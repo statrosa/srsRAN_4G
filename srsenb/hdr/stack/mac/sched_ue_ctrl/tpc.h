@@ -52,12 +52,14 @@ public:
                int      min_phr_thres_        = 0,
                uint32_t min_tpc_tti_interval_ = 1,
                float    ul_snr_avg_alpha      = 0.05,
-               int      init_ul_snr_value     = 5) :
+               int      init_ul_snr_value     = 5,
+               float    min_ul_snr_dB_        = -4.0f) :
     rnti(rnti_),
     nof_prb(cell_nof_prb),
     target_pucch_snr_dB(target_pucch_snr_dB_),
     target_pusch_snr_dB(target_pusch_sn_dB_),
     min_phr_thres(min_phr_thres_),
+    min_ul_snr_dB(min_ul_snr_dB_),
     snr_estim_list(
         {ul_ch_snr_estim{ul_snr_avg_alpha, init_ul_snr_value}, ul_ch_snr_estim{ul_snr_avg_alpha, init_ul_snr_value}}),
     phr_handling_flag(phr_handling_flag_),
@@ -73,8 +75,7 @@ public:
 
   void set_snr(float snr, uint32_t ul_ch_code)
   {
-    static const float MIN_UL_SNR = -4.0f;
-    if (snr < MIN_UL_SNR) {
+    if (snr < min_ul_snr_dB) {
       // Assume signal was not sent
       return;
     }
@@ -226,6 +227,7 @@ private:
   uint32_t              min_tpc_tti_interval = 1;
   float                 target_pucch_snr_dB, target_pusch_snr_dB;
   int                   min_phr_thres;
+  float                 min_ul_snr_dB = -4.0f;
   bool                  phr_handling_flag;
   srslog::basic_logger& logger;
 

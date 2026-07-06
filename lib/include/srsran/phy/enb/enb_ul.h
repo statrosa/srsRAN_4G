@@ -73,6 +73,8 @@ SRSRAN_API int srsran_enb_ul_set_cell(srsran_enb_ul_t*                   q,
                                       srsran_refsignal_dmrs_pusch_cfg_t* pusch_cfg,
                                       srsran_refsignal_srs_cfg_t*        srs_cfg);
 
+SRSRAN_API void srsran_enb_ul_set_smooth_filter3_coeff(srsran_enb_ul_t* q, float w);
+
 SRSRAN_API void srsran_enb_ul_fft(srsran_enb_ul_t* q);
 
 SRSRAN_API int srsran_enb_ul_get_pucch(srsran_enb_ul_t*    q,

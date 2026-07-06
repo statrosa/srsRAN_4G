@@ -56,6 +56,7 @@ public:
             uint32_t                  nof_workers);
   int  new_tti(uint32_t tti, cf_t* buffer);
   void set_max_prach_offset_us(float delay_us);
+  void set_detect_factor(float factor);
   void stop();
 
 private:
@@ -137,6 +138,13 @@ public:
   {
     for (auto& prach : prach_vec) {
       prach->set_max_prach_offset_us(delay_us);
+    }
+  }
+
+  void set_detect_factor(float factor)
+  {
+    for (auto& prach : prach_vec) {
+      prach->set_detect_factor(factor);
     }
   }
 

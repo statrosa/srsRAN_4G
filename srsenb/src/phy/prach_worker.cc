@@ -96,6 +96,11 @@ void prach_worker::set_max_prach_offset_us(float delay_us)
   max_prach_offset_us = delay_us;
 }
 
+void prach_worker::set_detect_factor(float factor)
+{
+  srsran_prach_set_detect_factor(&prach, factor);
+}
+
 int prach_worker::new_tti(uint32_t tti_rx, cf_t* buffer_rx)
 {
   // Save buffer only if it's a PRACH TTI

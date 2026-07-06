@@ -183,6 +183,8 @@ enable = false
 # adaptive_dl_mcs_step_size: Step size or learning rate used in adaptive DL MCS link
 # adaptive_ul_mcs_step_size: Step size or learning rate used in adaptive UL MCS link
 # min_tpc_tti_interval: Minimum TTI interval between TPCs different than 1
+# tpc_min_snr_db:    Minimum UL SNR sample (in dB) accepted by the UL power control loop; samples below
+#                    are treated as no-transmission (default: -4)
 # ul_snr_avg_alpha:  Exponential Average alpha coefficient used in estimation of UL SNR
 # init_ul_snr_value: Initial UL SNR value used for computing MCS in the first UL grant
 # init_dl_cqi:       DL CQI value used before any CQI report is available to the eNB
@@ -212,6 +214,7 @@ enable = false
 #adaptive_dl_mcs_step_size = 0.001
 #adaptive_ul_mcs_step_size = 0.001
 #min_tpc_tti_interval = 1
+#tpc_min_snr_db = -4
 #ul_snr_avg_alpha=0.05
 #init_ul_snr_value=5
 #init_dl_cqi=5
@@ -391,7 +394,7 @@ enable = false
 #####################################################################
 # Expert configuration options
 #
-# pusch_max_its:        Maximum number of turbo decoder iterations (default: 4)
+# pusch_max_its:        Maximum number of turbo decoder half-iterations (default: 8)
 # nr_pusch_max_its:     Maximum number of LDPC iterations for NR (Default 10)
 # pusch_8bit_decoder:   Use 8-bit for LLR representation and turbo decoder trellis computation (experimental)
 # nof_phy_threads:      Selects the number of PHY threads (maximum: 4, minimum: 1, default: 3)
@@ -411,7 +414,23 @@ enable = false
 # rrc_inactivity_timer  Inactivity timeout used to remove UE context from RRC (in milliseconds)
 # max_mac_dl_kos:       Maximum number of consecutive KOs in DL before triggering the UE's release (default: 100)
 # max_mac_ul_kos:       Maximum number of consecutive KOs in UL before triggering the UE's release (default: 100)
-# max_prach_offset_us:  Maximum allowed RACH offset (in us)
+# max_prach_offset_us:  Maximum allowed RACH offset (in us). Limits the cell radius (1 us ~ 150 m); raise for large cells
+# prach_detect_factor:  PRACH detection threshold as a factor over the correlation average (default: 60).
+#                       Lower values (e.g. 25-35) detect weaker preambles from faraway UEs at the cost of
+#                       occasional false RACH detections
+# pusch_min_snr_info_db: Minimum estimated PUSCH SNR (in dB) for reporting SNR/TA measurements to the
+#                       stack (default: 1.0). The estimate includes noise power, so a missed grant (DTX)
+#                       reads approx. 0 dB: keep this above 0 or DTX subframes contaminate power control.
+#                       Lower towards 0.2-0.5 so power control and link adaptation keep tracking cell-edge UEs
+# pucch_threshold_format1: PUCCH SR/ACK detection correlation threshold (default: 0.5). Lower values
+#                       (e.g. 0.2-0.3) detect PUCCH from weaker UEs; too low causes false ACK/SR detections
+# pucch_threshold_data_valid_format1a: PUCCH format 1a/1b ACK/NACK validity threshold (default: 0.5)
+# pucch_threshold_data_valid_format2: PUCCH format 2 CQI validity threshold (default: 0.5)
+# pucch_threshold_data_valid_format3: PUCCH format 3 validity threshold (default: 0.5)
+# pucch_threshold_dmrs: PUCCH DMRS detection gate (default: 0.4). Lower (e.g. 0.2) for weak UEs; 0 disables the gate
+# estimator_fil_w:      Coefficient w of the 3-tap [w, 1-2w, w] UL channel estimator smoothing filter
+#                       (default: 0.3333 = uniform averaging = maximum noise smoothing, best at low SNR).
+#                       Reduce only for highly frequency-selective channels
 # nof_prealloc_ues:     Number of UE memory resources to preallocate during eNB initialization for faster UE creation (default: 8)
 # rlf_release_timer_ms: Time taken by eNB to release UE context after it detects an RLF
 # eea_pref_list:        Ordered preference list for the selection of encryption algorithm (EEA) (default: EEA0, EEA2, EEA1)
@@ -448,6 +467,14 @@ enable = false
 #max_mac_dl_kos       = 100
 #max_mac_ul_kos       = 100
 #max_prach_offset_us  = 30
+#prach_detect_factor  = 60
+#pusch_min_snr_info_db = 1.0
+#pucch_threshold_format1 = 0.5
+#pucch_threshold_data_valid_format1a = 0.5
+#pucch_threshold_data_valid_format2 = 0.5
+#pucch_threshold_data_valid_format3 = 0.5
+#pucch_threshold_dmrs = 0.4
+#estimator_fil_w      = 0.3333
 #nof_prealloc_ues     = 8
 #rlf_release_timer_ms = 4000
 #lcid_padding         = 3
@@ -464,3 +491,30 @@ enable = false
 #rx_gain_offset = 62
 #mac_prach_bi         = 0
 #use_cedron_f_est_alg = false
+
+#####################################################################
+# Weak-signal / large-cell tuning (faraway UEs at low power / low SNR)
+#
+# Suggested starting point; all values are trade-offs against false
+# detections, so adjust gradually while watching the metrics:
+#
+#   [expert]
+#   prach_detect_factor   = 30     # detect weaker RACH preambles (watch for false RACH)
+#   max_prach_offset_us   = 60     # for cells larger than ~4 km radius
+#   pusch_max_its         = 16     # more turbo half-iterations; CRC early-stop keeps average cost low
+#   pusch_min_snr_info_db = 0.3    # keep power control / link adaptation tracking cell-edge UEs
+#   pucch_threshold_format1 = 0.25 # detect weaker SR/ACK (lower conservatively: false ACKs corrupt DL HARQ)
+#   pucch_threshold_dmrs  = 0.2
+#   use_cedron_f_est_alg  = true   # better TA/CFO estimation at low SNR
+#
+#   [scheduler]
+#   tpc_min_snr_db = -10           # accept low SNR samples in the power control loop
+#
+# Additionally, in rr.conf per cell enable closed-loop UL power control
+# (disabled by default) so weak UEs are commanded to raise power:
+#   target_pusch_sinr = 8
+#   target_pucch_sinr = 5
+#   enable_phr_handling = true
+# and in sib.conf ul_pwr_ctrl consider alpha = 0.8-1.0 so open-loop
+# power control compensates a larger fraction of the path loss.
+#####################################################################

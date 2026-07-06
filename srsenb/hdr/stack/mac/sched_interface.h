@@ -122,6 +122,7 @@ public:
     float       adaptive_dl_mcs_step_size = 0.001;
     float       adaptive_ul_mcs_step_size = 0.001;
     uint32_t    min_tpc_tti_interval      = 1;
+    float       tpc_min_snr_dB            = -4.0;
     float       ul_snr_avg_alpha          = 0.05;
     int         init_ul_snr_value         = 5;
     int         init_dl_cqi               = 5;

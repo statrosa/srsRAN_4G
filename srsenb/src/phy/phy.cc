@@ -197,6 +197,7 @@ int phy::init_lte(const phy_args_t&            args,
                args.nof_prach_threads);
   }
   prach.set_max_prach_offset_us(args.max_prach_offset_us);
+  prach.set_detect_factor(args.prach_detect_factor);
 
   return SRSRAN_SUCCESS;
 }

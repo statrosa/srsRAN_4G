@@ -101,6 +101,8 @@ SRSRAN_API void srsran_chest_ul_res_free(srsran_chest_ul_res_t* q);
 
 SRSRAN_API int srsran_chest_ul_set_cell(srsran_chest_ul_t* q, srsran_cell_t cell);
 
+SRSRAN_API void srsran_chest_ul_set_smooth_filter3_coeff(srsran_chest_ul_t* q, float w);
+
 SRSRAN_API void srsran_chest_ul_pregen(srsran_chest_ul_t*                 q,
                                        srsran_refsignal_dmrs_pusch_cfg_t* cfg,
                                        srsran_refsignal_srs_cfg_t*        srs_cfg);

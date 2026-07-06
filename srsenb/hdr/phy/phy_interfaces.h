@@ -61,9 +61,11 @@ struct phy_args_t {
 
   float                   rx_gain_offset      = 62;
   float                   max_prach_offset_us = 10;
+  float                   prach_detect_factor = 60.0f;
   uint32_t                pusch_max_its       = 10;
   uint32_t                nr_pusch_max_its    = 10;
   bool                    pusch_8bit_decoder  = false;
+  float                   pusch_min_snr_info_db = 1.0f;
   float                   tx_amplitude        = 1.0f;
   uint32_t                nof_phy_threads     = 1;
   std::string             equalizer_mode      = "mmse";
@@ -75,6 +77,11 @@ struct phy_args_t {
   bool                    use_cedron_alg      = false;
   uint32_t                nof_prach_threads   = 1;
   bool                    extended_cp         = false;
+  float                   pucch_threshold_format1             = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT1;
+  float                   pucch_threshold_data_valid_format1a = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT1A;
+  float                   pucch_threshold_data_valid_format2  = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT2;
+  float                   pucch_threshold_data_valid_format3  = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT3;
+  float                   pucch_threshold_dmrs                = SRSRAN_PUCCH_DEFAULT_THRESHOLD_DMRS;
   srsran::channel::args_t dl_channel_args;
   srsran::channel::args_t ul_channel_args;
   cfr_args_t              cfr_args;

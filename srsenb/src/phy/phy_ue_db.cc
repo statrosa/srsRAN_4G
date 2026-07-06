@@ -102,11 +102,11 @@ inline void phy_ue_db::_set_common_config_rnti(uint16_t rnti, srsran::phy_cfg_t&
   phy_cfg.ul_cfg.pusch.use_cedron_alg                = phy_args->use_cedron_alg;
   phy_cfg.ul_cfg.pusch.meas_evm_en                   = phy_args->pusch_meas_evm;
   phy_cfg.ul_cfg.pusch.max_nof_iterations            = phy_args->pusch_max_its;
-  phy_cfg.ul_cfg.pucch.threshold_format1             = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT1;
-  phy_cfg.ul_cfg.pucch.threshold_data_valid_format1a = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT1A;
-  phy_cfg.ul_cfg.pucch.threshold_data_valid_format2  = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT2;
-  phy_cfg.ul_cfg.pucch.threshold_data_valid_format3  = SRSRAN_PUCCH_DEFAULT_THRESHOLD_FORMAT3;
-  phy_cfg.ul_cfg.pucch.threshold_dmrs_detection      = SRSRAN_PUCCH_DEFAULT_THRESHOLD_DMRS;
+  phy_cfg.ul_cfg.pucch.threshold_format1             = phy_args->pucch_threshold_format1;
+  phy_cfg.ul_cfg.pucch.threshold_data_valid_format1a = phy_args->pucch_threshold_data_valid_format1a;
+  phy_cfg.ul_cfg.pucch.threshold_data_valid_format2  = phy_args->pucch_threshold_data_valid_format2;
+  phy_cfg.ul_cfg.pucch.threshold_data_valid_format3  = phy_args->pucch_threshold_data_valid_format3;
+  phy_cfg.ul_cfg.pucch.threshold_dmrs_detection      = phy_args->pucch_threshold_dmrs;
   phy_cfg.ul_cfg.pucch.meas_ta_en                    = phy_args->pucch_meas_ta;
   phy_cfg.ul_cfg.pucch.use_cedron_alg                = phy_args->use_cedron_alg;
 }

@@ -190,6 +190,14 @@ int srsran_chest_ul_set_cell(srsran_chest_ul_t* q, srsran_cell_t cell)
   return ret;
 }
 
+void srsran_chest_ul_set_smooth_filter3_coeff(srsran_chest_ul_t* q, float w)
+{
+  // The noise estimation correction in estimate_noise_pilots() is calibrated for a 3-tap filter and
+  // becomes singular as w approaches ~0.02; w above 1/3 makes the center tap negative
+  w                    = SRSRAN_MAX(0.05f, SRSRAN_MIN(w, 1.0f / 3.0f));
+  q->smooth_filter_len = srsran_chest_set_smooth_filter3_coeff(q->smooth_filter, w);
+}
+
 void srsran_chest_ul_pregen(srsran_chest_ul_t*                 q,
                             srsran_refsignal_dmrs_pusch_cfg_t* cfg,
                             srsran_refsignal_srs_cfg_t*        srs_cfg)

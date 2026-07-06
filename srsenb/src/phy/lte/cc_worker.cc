@@ -132,6 +132,8 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
     return;
   }
 
+  srsran_enb_ul_set_smooth_filter3_coeff(&enb_ul, phy->params.estimator_fil_w);
+
   /* Setup SI-RNTI in PHY */
   add_rnti(SRSRAN_SIRNTI);
 
@@ -354,7 +356,7 @@ bool cc_worker::decode_pusch_rnti(stack_interface_phy_lte::ul_sched_grant_t& ul_
   float snr_db = enb_ul.chest_res.snr_db;
 
   // Notify MAC of RL status
-  if (snr_db >= PUSCH_RL_SNR_DB_TH) {
+  if (snr_db >= phy->params.pusch_min_snr_info_db) {
     // Notify MAC UL channel quality
     phy->stack->snr_info(ul_sf.tti, rnti, cc_idx, snr_db, mac_interface_phy_lte::PUSCH);
 

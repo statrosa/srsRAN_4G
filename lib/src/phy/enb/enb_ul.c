@@ -148,6 +148,11 @@ int srsran_enb_ul_set_cell(srsran_enb_ul_t*                   q,
   return ret;
 }
 
+void srsran_enb_ul_set_smooth_filter3_coeff(srsran_enb_ul_t* q, float w)
+{
+  srsran_chest_ul_set_smooth_filter3_coeff(&q->chest, w);
+}
+
 void srsran_enb_ul_fft(srsran_enb_ul_t* q)
 {
   srsran_ofdm_rx_sf(&q->fft);
