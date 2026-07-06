@@ -38,19 +38,6 @@ int prach_worker::init(const srsran_cell_t&      cell_,
   nof_workers = nof_workers_;
   nof_rx_ant  = SRSRAN_MAX(1, SRSRAN_MIN(nof_rx_antennas_, SRSRAN_MAX_PORTS));
 
-  // Pre-size the sample buffers of the entire pool to avoid allocations in the data path
-  {
-    std::vector<sf_buffer*> tmp;
-    for (sf_buffer* b = buffer_pool.allocate(nullptr, false); b != nullptr;
-         b            = buffer_pool.allocate(nullptr, false)) {
-      b->ensure_antennas(nof_rx_ant);
-      tmp.push_back(b);
-    }
-    for (sf_buffer* b : tmp) {
-      buffer_pool.deallocate(b);
-    }
-  }
-
   max_prach_offset_us = 50;
 
   if (srsran_prach_init(&prach, srsran_symbol_sz(cell.nof_prb))) {

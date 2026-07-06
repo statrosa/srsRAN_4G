@@ -354,8 +354,7 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
           goto clean_exit;
         }
       } else {
-        fprintf(stdout, "[zmq] %s Tx port not specified. Disabling transmitter.\n", handler->id);
-        handler->tx_off = true;
+        fprintf(stdout, "[zmq] %s Tx port not specified. Disabling transmitter %d.\n", handler->id, i);
       }
 
       // initialize receiver
@@ -372,6 +371,19 @@ int rf_zmq_open_multi(char* args, void** h, uint32_t nof_channels)
         fprintf(stderr, "[zmq] Error: Neither Tx port nor Rx port specified.\n");
         goto clean_exit;
       }
+    }
+
+    // Disable transmission for the whole device only if no channel has a transmitter. Channels without transmitter
+    // discard their samples individually, which allows RX-only channels (e.g. UL receive diversity).
+    {
+      bool any_tx = false;
+      for (uint32_t i = 0; i < handler->nof_channels; i++) {
+        if (handler->transmitter[i].running) {
+          any_tx = true;
+          break;
+        }
+      }
+      handler->tx_off = !any_tx;
     }
 
     // Create decimation and overflow buffer
