@@ -45,10 +45,10 @@
 #define MAX_PUSCH_RE(cp) (2 * SRSRAN_CP_NSYMB(cp) * 12)
 
 /** Initializes the PUCCH transmitter and receiver */
-int srsran_pucch_init_(srsran_pucch_t* q, bool is_ue)
+int srsran_pucch_init_(srsran_pucch_t* q, bool is_ue, uint32_t nof_rx_antennas)
 {
   int ret = SRSRAN_ERROR_INVALID_INPUTS;
-  if (q != NULL) {
+  if (q != NULL && nof_rx_antennas >= 1 && nof_rx_antennas <= SRSRAN_MAX_PORTS) {
     ret = SRSRAN_ERROR;
     bzero(q, sizeof(srsran_pucch_t));
 
@@ -56,7 +56,8 @@ int srsran_pucch_init_(srsran_pucch_t* q, bool is_ue)
       return SRSRAN_ERROR;
     }
 
-    q->is_ue = is_ue;
+    q->is_ue           = is_ue;
+    q->nof_rx_antennas = nof_rx_antennas;
 
     if (srsran_sequence_init(&q->seq_f2, 20)) {
       goto clean_exit;
@@ -64,11 +65,15 @@ int srsran_pucch_init_(srsran_pucch_t* q, bool is_ue)
 
     srsran_uci_cqi_pucch_init(&q->cqi);
 
-    q->z     = srsran_vec_cf_malloc(SRSRAN_PUCCH_MAX_SYMBOLS);
-    q->z_tmp = srsran_vec_cf_malloc(SRSRAN_PUCCH_MAX_SYMBOLS);
+    q->z = srsran_vec_cf_malloc(SRSRAN_PUCCH_MAX_SYMBOLS);
+    for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+      q->z_tmp[a] = srsran_vec_cf_malloc(SRSRAN_PUCCH_MAX_SYMBOLS);
+    }
 
     if (!q->is_ue) {
-      q->ce = srsran_vec_cf_malloc(SRSRAN_PUCCH_MAX_SYMBOLS);
+      for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+        q->ce[a] = srsran_vec_cf_malloc(SRSRAN_PUCCH_MAX_SYMBOLS);
+      }
     }
 
     ret = SRSRAN_SUCCESS;
@@ -82,12 +87,12 @@ clean_exit:
 
 int srsran_pucch_init_ue(srsran_pucch_t* q)
 {
-  return srsran_pucch_init_(q, true);
+  return srsran_pucch_init_(q, true, 1);
 }
 
-int srsran_pucch_init_enb(srsran_pucch_t* q)
+int srsran_pucch_init_enb(srsran_pucch_t* q, uint32_t nof_rx_antennas)
 {
-  return srsran_pucch_init_(q, false);
+  return srsran_pucch_init_(q, false, nof_rx_antennas);
 }
 
 void srsran_pucch_free(srsran_pucch_t* q)
@@ -98,11 +103,13 @@ void srsran_pucch_free(srsran_pucch_t* q)
   if (q->z) {
     free(q->z);
   }
-  if (q->z_tmp) {
-    free(q->z_tmp);
-  }
-  if (q->ce) {
-    free(q->ce);
+  for (uint32_t a = 0; a < SRSRAN_MAX_PORTS; a++) {
+    if (q->z_tmp[a]) {
+      free(q->z_tmp[a]);
+    }
+    if (q->ce[a]) {
+      free(q->ce[a]);
+    }
   }
 
   srsran_modem_table_free(&q->mod);
@@ -639,8 +646,8 @@ static bool decode_signal(srsran_pucch_t*     q,
 
   switch (cfg->format) {
     case SRSRAN_PUCCH_FORMAT_1:
-      encode_signal(q, sf, cfg, pucch_bits, q->z_tmp);
-      corr = srsran_vec_corr_ccc(q->z, q->z_tmp, nof_re);
+      encode_signal(q, sf, cfg, pucch_bits, q->z_tmp[0]);
+      corr = srsran_vec_corr_ccc(q->z, q->z_tmp[0], nof_re);
       if (corr >= cfg->threshold_format1) {
         detected = true;
       }
@@ -650,8 +657,8 @@ static bool decode_signal(srsran_pucch_t*     q,
       detected = 0;
       for (uint8_t b = 0; b < 2; b++) {
         pucch_bits[0] = b;
-        encode_signal(q, sf, cfg, pucch_bits, q->z_tmp);
-        corr = srsran_vec_corr_ccc(q->z, q->z_tmp, nof_re);
+        encode_signal(q, sf, cfg, pucch_bits, q->z_tmp[0]);
+        corr = srsran_vec_corr_ccc(q->z, q->z_tmp[0], nof_re);
         if (corr > corr_max) {
           corr_max = corr;
           b_max    = b;
@@ -670,8 +677,8 @@ static bool decode_signal(srsran_pucch_t*     q,
         for (uint8_t b2 = 0; b2 < 2; b2++) {
           pucch_bits[0] = b;
           pucch_bits[1] = b2;
-          encode_signal(q, sf, cfg, pucch_bits, q->z_tmp);
-          corr = srsran_vec_corr_ccc(q->z, q->z_tmp, nof_re);
+          encode_signal(q, sf, cfg, pucch_bits, q->z_tmp[0]);
+          corr = srsran_vec_corr_ccc(q->z, q->z_tmp[0], nof_re);
           if (corr > corr_max) {
             corr_max = corr;
             b_max    = b;
@@ -695,9 +702,9 @@ static bool decode_signal(srsran_pucch_t*     q,
         return SRSRAN_ERROR;
       }
       encode_signal_format12(q, sf, cfg, NULL, ref, true);
-      srsran_vec_prod_conj_ccc(q->z, ref, q->z_tmp, SRSRAN_PUCCH_MAX_SYMBOLS);
+      srsran_vec_prod_conj_ccc(q->z, ref, q->z_tmp[0], SRSRAN_PUCCH_MAX_SYMBOLS);
       for (int i = 0; i < (SRSRAN_PUCCH2_N_SF * SRSRAN_NOF_SLOTS_PER_SF); i++) {
-        q->z[i] = srsran_vec_acc_cc(&q->z_tmp[i * SRSRAN_NRE], SRSRAN_NRE) / SRSRAN_NRE;
+        q->z[i] = srsran_vec_acc_cc(&q->z_tmp[0][i * SRSRAN_NRE], SRSRAN_NRE) / SRSRAN_NRE;
       }
       srsran_demod_soft_demodulate_s(SRSRAN_MOD_QPSK, q->z, llr_pucch2, SRSRAN_PUCCH2_NOF_BITS / 2);
       srsran_scrambling_s_offset(&q->seq_f2, llr_pucch2, 0, SRSRAN_PUCCH2_NOF_BITS);
@@ -798,7 +805,7 @@ int srsran_pucch_decode(srsran_pucch_t*        q,
                         srsran_ul_sf_cfg_t*    sf,
                         srsran_pucch_cfg_t*    cfg,
                         srsran_chest_ul_res_t* channel,
-                        cf_t*                  sf_symbols,
+                        cf_t*                  sf_symbols[SRSRAN_MAX_PORTS],
                         srsran_pucch_res_t*    data)
 {
   uint8_t pucch_bits[SRSRAN_CQI_MAX_BITS];
@@ -810,26 +817,43 @@ int srsran_pucch_decode(srsran_pucch_t*        q,
     uint32_t nof_cqi_bits = srsran_cqi_size(&cfg->uci_cfg.cqi);
     uint32_t nof_uci_bits = cfg->uci_cfg.cqi.ri_len ? cfg->uci_cfg.cqi.ri_len : nof_cqi_bits;
 
-    int nof_re = pucch_get(q, sf, cfg, sf_symbols, q->z_tmp);
-    if (nof_re < 0) {
-      ERROR("Error getting PUCCH symbols");
-      return SRSRAN_ERROR;
+    uint32_t nof_rx_antennas = SRSRAN_MAX(1, SRSRAN_MIN(q->nof_rx_antennas, channel->nof_rx_antennas));
+
+    int nof_re = 0;
+    for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+      if (sf_symbols[a] == NULL || channel->ce[a] == NULL) {
+        ERROR("Error RX antenna %d buffer is not initialised", a);
+        return SRSRAN_ERROR_INVALID_INPUTS;
+      }
+
+      nof_re = pucch_get(q, sf, cfg, sf_symbols[a], q->z_tmp[a]);
+      if (nof_re < 0) {
+        ERROR("Error getting PUCCH symbols");
+        return SRSRAN_ERROR;
+      }
+
+      if (pucch_get(q, sf, cfg, channel->ce[a], q->ce[a]) < 0) {
+        ERROR("Error getting PUCCH symbols");
+        return SRSRAN_ERROR;
+      }
     }
 
-    if (pucch_get(q, sf, cfg, channel->ce, q->ce) < 0) {
-      ERROR("Error getting PUCCH symbols");
-      return SRSRAN_ERROR;
-    }
-
-    // Equalization
-    srsran_predecoding_single(q->z_tmp, q->ce, q->z, NULL, nof_re, 1.0f, channel->noise_estimate);
+    // Equalization with MRC over RX antennas
+    srsran_predecoding_single_multi(q->z_tmp, q->ce, q->z, NULL, nof_rx_antennas, nof_re, 1.0f, channel->noise_estimate);
 
     // Perform DMRS Detection, if enabled
     if (isnormal(cfg->threshold_dmrs_detection)) {
-      cf_t  _dmrs_corr       = srsran_vec_acc_cc(q->ce, SRSRAN_NRE) / SRSRAN_NRE;
-      float rms              = __real__(conjf(_dmrs_corr) * _dmrs_corr);
-      float power            = srsran_vec_avg_power_cf(q->ce, SRSRAN_NRE);
-      data->dmrs_correlation = rms / power;
+      // Use the best antenna: a UE visible on a single branch shall still pass the gate
+      data->dmrs_correlation = 0.0f;
+      for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+        cf_t  _dmrs_corr = srsran_vec_acc_cc(q->ce[a], SRSRAN_NRE) / SRSRAN_NRE;
+        float rms        = __real__(conjf(_dmrs_corr) * _dmrs_corr);
+        float power      = srsran_vec_avg_power_cf(q->ce[a], SRSRAN_NRE);
+        float ratio      = rms / power;
+        if (isnormal(ratio) && ratio > data->dmrs_correlation) {
+          data->dmrs_correlation = ratio;
+        }
+      }
 
       // Return not detected if the ratio is 0, NAN, +/- Infinity or below threshold
       if (!isnormal(data->dmrs_correlation) || data->dmrs_correlation < cfg->threshold_dmrs_detection) {

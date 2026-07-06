@@ -142,29 +142,40 @@ void srsran_chest_ul_free(srsran_chest_ul_t* q)
   bzero(q, sizeof(srsran_chest_ul_t));
 }
 
-int srsran_chest_ul_res_init(srsran_chest_ul_res_t* q, uint32_t max_prb)
+int srsran_chest_ul_res_init(srsran_chest_ul_res_t* q, uint32_t max_prb, uint32_t nof_rx_antennas)
 {
-  bzero(q, sizeof(srsran_chest_ul_res_t));
-  q->nof_re = SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM);
-  q->ce     = srsran_vec_cf_malloc(q->nof_re);
-  if (!q->ce) {
-    perror("malloc");
+  if (nof_rx_antennas < 1 || nof_rx_antennas > SRSRAN_MAX_PORTS) {
     return -1;
+  }
+  bzero(q, sizeof(srsran_chest_ul_res_t));
+  q->nof_re          = SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM);
+  q->nof_rx_antennas = nof_rx_antennas;
+  for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+    q->ce[a] = srsran_vec_cf_malloc(q->nof_re);
+    if (!q->ce[a]) {
+      perror("malloc");
+      return -1;
+    }
   }
   return 0;
 }
 
 void srsran_chest_ul_res_set_identity(srsran_chest_ul_res_t* q)
 {
-  for (uint32_t i = 0; i < q->nof_re; i++) {
-    q->ce[i] = 1.0;
+  for (uint32_t a = 0; a < q->nof_rx_antennas; a++) {
+    for (uint32_t i = 0; i < q->nof_re; i++) {
+      q->ce[a][i] = 1.0;
+    }
   }
 }
 
 void srsran_chest_ul_res_free(srsran_chest_ul_res_t* q)
 {
-  if (q->ce) {
-    free(q->ce);
+  for (uint32_t a = 0; a < SRSRAN_MAX_PORTS; a++) {
+    if (q->ce[a]) {
+      free(q->ce[a]);
+      q->ce[a] = NULL;
+    }
   }
 }
 
@@ -282,36 +293,96 @@ average_pilots(srsran_chest_ul_t* q, cf_t* input, cf_t* ce, uint32_t nslots, uin
   }
 }
 
+/* Per-antenna measurements, combined across antennas by chest_ul_combine_meas() */
+typedef struct {
+  float noise_estimate;
+  float epre;
+  float rsrp;
+  float cfo_hz;
+  float ta_us;
+} chest_ul_ant_meas_t;
+
 /**
- * Generic PUSCH and DMRS channel estimation. It assumes q->pilot_estimates has been populated with the Least Square
- * Estimates
+ * Combines the per-antenna measurements into the result scalars consumed by upper layers. The noise, EPRE and RSRP
+ * are averaged over antennas; the SNR is the sum of the per-antenna SNRs (post-MRC effective SNR); TA and CFO are
+ * common to all branches so they are RSRP-weighted to protect against a disconnected antenna.
+ */
+static void chest_ul_combine_meas(const chest_ul_ant_meas_t* meas, uint32_t nof_antennas, srsran_chest_ul_res_t* res)
+{
+  float noise_sum = 0.0f;
+  float epre_sum  = 0.0f;
+  float rsrp_sum  = 0.0f;
+  float snr_sum   = 0.0f;
+  bool  snr_valid = false;
+  float ta_wsum = 0.0f, ta_w = 0.0f;
+  float cfo_wsum = 0.0f, cfo_w = 0.0f;
+
+  for (uint32_t a = 0; a < nof_antennas; a++) {
+    noise_sum += meas[a].noise_estimate;
+    epre_sum += meas[a].epre;
+    rsrp_sum += meas[a].rsrp;
+
+    if (isnormal(meas[a].noise_estimate)) {
+      snr_sum += meas[a].epre / meas[a].noise_estimate;
+      snr_valid = true;
+    }
+
+    float w = isnormal(meas[a].rsrp) ? meas[a].rsrp : 0.0f;
+    if (!isnan(meas[a].ta_us) && !isinf(meas[a].ta_us) && w > 0.0f) {
+      ta_wsum += w * meas[a].ta_us;
+      ta_w += w;
+    }
+    if (!isnan(meas[a].cfo_hz) && !isinf(meas[a].cfo_hz) && w > 0.0f) {
+      cfo_wsum += w * meas[a].cfo_hz;
+      cfo_w += w;
+    }
+  }
+
+  res->noise_estimate = noise_sum / nof_antennas;
+  res->epre           = epre_sum / nof_antennas;
+  res->rsrp           = SRSRAN_MIN(rsrp_sum / nof_antennas, res->epre);
+  res->snr            = snr_valid ? snr_sum : NAN;
+  res->ta_us          = (ta_w > 0.0f) ? (ta_wsum / ta_w) : 0.0f;
+  res->cfo_hz         = (cfo_w > 0.0f) ? (cfo_wsum / cfo_w) : NAN;
+
+  res->epre_dBfs           = srsran_convert_power_to_dB(res->epre);
+  res->rsrp_dBfs           = srsran_convert_power_to_dB(res->rsrp);
+  res->snr_db              = srsran_convert_power_to_dB(res->snr);
+  res->noise_estimate_dbFs = srsran_convert_power_to_dBm(res->noise_estimate);
+}
+
+/**
+ * Generic PUSCH and DMRS channel estimation for a single RX antenna. It assumes q->pilot_estimates has been populated
+ * with the Least Square Estimates
  *
  * @param q Uplink Channel estimation instance
  * @param nslots number of slots (2 for DMRS, 1 for SRS)
  * @param nrefs_sym number of reference resource elements per symbols (depends on configuration)
  * @param stride sub-carrier distance between reference signal resource elements (1 for DMRS, 2 for SRS)
  * @param meas_ta_en enables or disables the Time Alignment error measurement
- * @param write_estimates Write channel estimation in res, (true for DMRS and false for SRS)
+ * @param write_estimates Write channel estimation in ce, (true for DMRS and false for SRS)
  * @param n_prb Resource block start for the grant, set to zero for Sounding Reference Signals
- * @param res UL channel estimation result
+ * @param ce channel estimation output for this antenna (may be NULL)
+ * @param meas per-antenna measurement output
  */
-static void chest_ul_estimate(srsran_chest_ul_t*     q,
-                              uint32_t               nslots,
-                              uint32_t               nrefs_sym,
-                              uint32_t               stride,
-                              bool                   meas_ta_en,
-                              bool                   use_cedron_alg,
-                              bool                   write_estimates,
-                              uint32_t               n_prb[SRSRAN_NOF_SLOTS_PER_SF],
-                              srsran_chest_ul_res_t* res)
+static void chest_ul_estimate(srsran_chest_ul_t*   q,
+                              uint32_t             nslots,
+                              uint32_t             nrefs_sym,
+                              uint32_t             stride,
+                              bool                 meas_ta_en,
+                              bool                 use_cedron_alg,
+                              bool                 write_estimates,
+                              uint32_t             n_prb[SRSRAN_NOF_SLOTS_PER_SF],
+                              cf_t*                ce,
+                              chest_ul_ant_meas_t* meas)
 {
   // Calculate CFO
   if (nslots == 2) {
     float phase = cargf(srsran_vec_dot_prod_conj_ccc(
         &q->pilot_estimates[0 * nrefs_sym], &q->pilot_estimates[1 * nrefs_sym], nrefs_sym));
-    res->cfo_hz = phase / (2.0f * (float)M_PI * 0.0005f);
+    meas->cfo_hz = phase / (2.0f * (float)M_PI * 0.0005f);
   } else {
-    res->cfo_hz = NAN;
+    meas->cfo_hz = NAN;
   }
 
   // Calculate time alignment error
@@ -330,13 +401,13 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
 
   // Calculate actual time alignment error in micro-seconds
   if (isnormal(ta_err) && stride > 0) {
-    ta_err /= (float)stride;                     // Divide by the pilot spacing
-    ta_err /= 15e3f;                             // Convert from normalized frequency to seconds
-    ta_err *= 1e6f;                              // Convert to micro-seconds
-    ta_err     = roundf(ta_err * 10.0f) / 10.0f; // Round to one tenth of micro-second
-    res->ta_us = ta_err;
+    ta_err /= (float)stride;                      // Divide by the pilot spacing
+    ta_err /= 15e3f;                              // Convert from normalized frequency to seconds
+    ta_err *= 1e6f;                               // Convert to micro-seconds
+    ta_err       = roundf(ta_err * 10.0f) / 10.0f; // Round to one tenth of micro-second
+    meas->ta_us = ta_err;
   } else {
-    res->ta_us = 0.0f;
+    meas->ta_us = 0.0f;
   }
 
   // Check if intra-subframe frequency hopping is enabled
@@ -344,29 +415,31 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
     ERROR("ERROR: intra-subframe frequency hopping not supported in the estimator!!");
   }
 
-  if (res->ce != NULL) {
+  if (ce != NULL) {
     if (q->smooth_filter_len > 0) {
-      average_pilots(q, q->pilot_estimates, res->ce, nslots, nrefs_sym, n_prb);
+      average_pilots(q, q->pilot_estimates, ce, nslots, nrefs_sym, n_prb);
 
       if (write_estimates) {
-        interpolate_pilots(q, res->ce, nslots, nrefs_sym, n_prb);
+        interpolate_pilots(q, ce, nslots, nrefs_sym, n_prb);
       }
 
       // If averaging, compute noise from difference between received and averaged estimates
-      res->noise_estimate = estimate_noise_pilots(q, res->ce, nslots, nrefs_sym, n_prb);
+      meas->noise_estimate = estimate_noise_pilots(q, ce, nslots, nrefs_sym, n_prb);
     } else {
       // Copy estimates to CE vector without averaging
       for (int i = 0; i < nslots; i++) {
         srsran_vec_cf_copy(
-            &res->ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE],
+            &ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE],
             &q->pilot_estimates[i * nrefs_sym],
             nrefs_sym);
       }
       if (write_estimates) {
-        interpolate_pilots(q, res->ce, nslots, nrefs_sym, n_prb);
+        interpolate_pilots(q, ce, nslots, nrefs_sym, n_prb);
       }
-      res->noise_estimate = 0;
+      meas->noise_estimate = 0;
     }
+  } else {
+    meas->noise_estimate = 0;
   }
 
   // Measure reference signal RE average power
@@ -379,26 +452,15 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
   // RSRP shall not be greater than EPRE
   rsrp_avg = SRSRAN_MIN(rsrp_avg, epre);
 
-  // Calculate SNR
-  if (isnormal(res->noise_estimate)) {
-    res->snr = epre / res->noise_estimate;
-  } else {
-    res->snr = NAN;
-  }
-
   // Set EPRE and RSRP
-  res->epre                = epre;
-  res->epre_dBfs           = srsran_convert_power_to_dB(res->epre);
-  res->rsrp                = rsrp_avg;
-  res->rsrp_dBfs           = srsran_convert_power_to_dB(res->rsrp);
-  res->snr_db              = srsran_convert_power_to_dB(res->snr);
-  res->noise_estimate_dbFs = srsran_convert_power_to_dBm(res->noise_estimate);
+  meas->epre = epre;
+  meas->rsrp = rsrp_avg;
 }
 
 int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                                    srsran_ul_sf_cfg_t*    sf,
                                    srsran_pusch_cfg_t*    cfg,
-                                   cf_t*                  input,
+                                   cf_t*                  input[SRSRAN_MAX_PORTS],
                                    srsran_chest_ul_res_t* res)
 {
   if (!q->dmrs_signal_configured) {
@@ -416,18 +478,37 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
   int nrefs_sym = nof_prb * SRSRAN_NRE;
   int nrefs_sf  = nrefs_sym * SRSRAN_NOF_SLOTS_PER_SF;
 
-  /* Get references from the input signal */
-  srsran_refsignal_dmrs_pusch_get(&q->dmrs_signal, cfg, input, q->pilot_recv_signal);
+  uint32_t            nof_antennas             = SRSRAN_MAX(1, res->nof_rx_antennas);
+  chest_ul_ant_meas_t meas[SRSRAN_MAX_PORTS]   = {};
 
-  // Use the known DMRS signal to compute Least-squares estimates
-  srsran_vec_prod_conj_ccc(q->pilot_recv_signal,
-                           q->dmrs_pregen.r[cfg->grant.n_dmrs][sf->tti % SRSRAN_NOF_SF_X_FRAME][nof_prb],
-                           q->pilot_estimates,
-                           nrefs_sf);
+  for (uint32_t a = 0; a < nof_antennas; a++) {
+    if (input[a] == NULL) {
+      return SRSRAN_ERROR_INVALID_INPUTS;
+    }
 
-  // Estimate
-  chest_ul_estimate(
-      q, SRSRAN_NOF_SLOTS_PER_SF, nrefs_sym, 1, cfg->meas_ta_en, cfg->use_cedron_alg, true, cfg->grant.n_prb, res);
+    /* Get references from the input signal */
+    srsran_refsignal_dmrs_pusch_get(&q->dmrs_signal, cfg, input[a], q->pilot_recv_signal);
+
+    // Use the known DMRS signal to compute Least-squares estimates
+    srsran_vec_prod_conj_ccc(q->pilot_recv_signal,
+                             q->dmrs_pregen.r[cfg->grant.n_dmrs][sf->tti % SRSRAN_NOF_SF_X_FRAME][nof_prb],
+                             q->pilot_estimates,
+                             nrefs_sf);
+
+    // Estimate
+    chest_ul_estimate(q,
+                      SRSRAN_NOF_SLOTS_PER_SF,
+                      nrefs_sym,
+                      1,
+                      cfg->meas_ta_en,
+                      cfg->use_cedron_alg,
+                      true,
+                      cfg->grant.n_prb,
+                      res->ce[a],
+                      &meas[a]);
+  }
+
+  chest_ul_combine_meas(meas, nof_antennas, res);
 
   return 0;
 }
@@ -462,7 +543,7 @@ estimate_noise_pilots_pucch(srsran_chest_ul_t* q, cf_t* ce, uint32_t n_rs, uint3
 int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
                                    srsran_ul_sf_cfg_t*    sf,
                                    srsran_pucch_cfg_t*    cfg,
-                                   cf_t*                  input,
+                                   cf_t*                  input[SRSRAN_MAX_PORTS],
                                    srsran_chest_ul_res_t* res)
 {
   int n_rs = srsran_refsignal_dmrs_N_rs(cfg->format, q->cell.cp);
@@ -472,10 +553,15 @@ int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
   }
   int nrefs_sf = SRSRAN_NRE * n_rs * SRSRAN_NOF_SLOTS_PER_SF;
 
-  /* Get references from the input signal */
-  srsran_refsignal_dmrs_pucch_get(&q->dmrs_signal, cfg, input, q->pilot_recv_signal);
+  uint32_t nof_antennas = SRSRAN_MAX(1, res->nof_rx_antennas);
 
-  /* Generate known pilots */
+  for (uint32_t a = 0; a < nof_antennas; a++) {
+    if (input[a] == NULL) {
+      return SRSRAN_ERROR_INVALID_INPUTS;
+    }
+  }
+
+  /* Select the format 2a/2b DRS bits jointly across antennas before per-antenna estimation */
   if (cfg->format == SRSRAN_PUCCH_FORMAT_2A || cfg->format == SRSRAN_PUCCH_FORMAT_2B) {
     float max   = -1e9;
     int   i_max = 0;
@@ -491,120 +577,118 @@ int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
       cfg->pucch2_drs_bits[0] = i % 2;
       cfg->pucch2_drs_bits[1] = i / 2;
       srsran_refsignal_dmrs_pucch_gen(&q->dmrs_signal, sf, cfg, q->pilot_known_signal);
-      srsran_vec_prod_conj_ccc(q->pilot_recv_signal, q->pilot_known_signal, q->pilot_estimates_tmp[i], nrefs_sf);
-      float x = cabsf(srsran_vec_acc_cc(q->pilot_estimates_tmp[i], nrefs_sf));
+      float x = 0.0f;
+      for (uint32_t a = 0; a < nof_antennas; a++) {
+        srsran_refsignal_dmrs_pucch_get(&q->dmrs_signal, cfg, input[a], q->pilot_recv_signal);
+        srsran_vec_prod_conj_ccc(q->pilot_recv_signal, q->pilot_known_signal, q->pilot_estimates_tmp[i], nrefs_sf);
+        x += cabsf(srsran_vec_acc_cc(q->pilot_estimates_tmp[i], nrefs_sf));
+      }
       if (x >= max) {
         max   = x;
         i_max = i;
       }
     }
-    memcpy(q->pilot_estimates, q->pilot_estimates_tmp[i_max], nrefs_sf * sizeof(cf_t));
     cfg->pucch2_drs_bits[0] = i_max % 2;
     cfg->pucch2_drs_bits[1] = i_max / 2;
-
-  } else {
-    srsran_refsignal_dmrs_pucch_gen(&q->dmrs_signal, sf, cfg, q->pilot_known_signal);
-    /* Use the known DMRS signal to compute Least-squares estimates */
-    srsran_vec_prod_conj_ccc(q->pilot_recv_signal, q->pilot_known_signal, q->pilot_estimates, nrefs_sf);
   }
 
-  // Measure reference signal RE average power
-  cf_t corr = srsran_vec_acc_cc(q->pilot_estimates, SRSRAN_NOF_SLOTS_PER_SF * SRSRAN_NRE * n_rs) /
-              (SRSRAN_NOF_SLOTS_PER_SF * SRSRAN_NRE * n_rs);
-  float rsrp_avg = __real__ corr * __real__ corr + __imag__ corr * __imag__ corr;
+  chest_ul_ant_meas_t meas[SRSRAN_MAX_PORTS] = {};
 
-  // Measure EPRE
-  float epre = srsran_vec_avg_power_cf(q->pilot_estimates, SRSRAN_NOF_SLOTS_PER_SF * SRSRAN_NRE * n_rs);
+  for (uint32_t a = 0; a < nof_antennas; a++) {
+    /* Get references from the input signal */
+    srsran_refsignal_dmrs_pucch_get(&q->dmrs_signal, cfg, input[a], q->pilot_recv_signal);
 
-  // RSRP shall not be greater than EPRE
-  rsrp_avg = SRSRAN_MIN(rsrp_avg, epre);
+    /* Generate known pilots (with the selected DRS bits for format 2a/2b) and compute LS estimates */
+    srsran_refsignal_dmrs_pucch_gen(&q->dmrs_signal, sf, cfg, q->pilot_known_signal);
+    srsran_vec_prod_conj_ccc(q->pilot_recv_signal, q->pilot_known_signal, q->pilot_estimates, nrefs_sf);
 
-  // Set EPRE and RSRP
-  res->epre      = epre;
-  res->epre_dBfs = srsran_convert_power_to_dB(res->epre);
-  res->rsrp      = rsrp_avg;
-  res->rsrp_dBfs = srsran_convert_power_to_dB(res->rsrp);
+    // Measure reference signal RE average power
+    cf_t corr = srsran_vec_acc_cc(q->pilot_estimates, SRSRAN_NOF_SLOTS_PER_SF * SRSRAN_NRE * n_rs) /
+                (SRSRAN_NOF_SLOTS_PER_SF * SRSRAN_NRE * n_rs);
+    float rsrp_avg = __real__ corr * __real__ corr + __imag__ corr * __imag__ corr;
 
-  // Estimate time alignment
-  if (cfg->meas_ta_en) {
-    float ta_err = 0.0f;
-    for (int ns = 0; ns < SRSRAN_NOF_SLOTS_PER_SF; ns++) {
-      for (int i = 0; i < n_rs; i++) {
-        if (cfg->use_cedron_alg) {
-          ta_err += srsran_cedron_freq_estimate(
-                        &q->srsran_cedron_freq_est, &q->pilot_estimates[(i + ns * n_rs) * SRSRAN_NRE], SRSRAN_NRE) /
-                    (float)(SRSRAN_NOF_SLOTS_PER_SF * n_rs);
-        } else {
-          ta_err += srsran_vec_estimate_frequency(&q->pilot_estimates[(i + ns * n_rs) * SRSRAN_NRE], SRSRAN_NRE) /
-                    (float)(SRSRAN_NOF_SLOTS_PER_SF * n_rs);
+    // Measure EPRE
+    float epre = srsran_vec_avg_power_cf(q->pilot_estimates, SRSRAN_NOF_SLOTS_PER_SF * SRSRAN_NRE * n_rs);
+
+    // RSRP shall not be greater than EPRE
+    rsrp_avg = SRSRAN_MIN(rsrp_avg, epre);
+
+    meas[a].epre   = epre;
+    meas[a].rsrp   = rsrp_avg;
+    meas[a].cfo_hz = NAN;
+    meas[a].ta_us  = 0.0f;
+
+    // Estimate time alignment
+    if (cfg->meas_ta_en) {
+      float ta_err = 0.0f;
+      for (int ns = 0; ns < SRSRAN_NOF_SLOTS_PER_SF; ns++) {
+        for (int i = 0; i < n_rs; i++) {
+          if (cfg->use_cedron_alg) {
+            ta_err += srsran_cedron_freq_estimate(
+                          &q->srsran_cedron_freq_est, &q->pilot_estimates[(i + ns * n_rs) * SRSRAN_NRE], SRSRAN_NRE) /
+                      (float)(SRSRAN_NOF_SLOTS_PER_SF * n_rs);
+          } else {
+            ta_err += srsran_vec_estimate_frequency(&q->pilot_estimates[(i + ns * n_rs) * SRSRAN_NRE], SRSRAN_NRE) /
+                      (float)(SRSRAN_NOF_SLOTS_PER_SF * n_rs);
+          }
         }
       }
-    }
 
-    // Calculate actual time alignment error in micro-seconds
-    if (isnormal(ta_err)) {
-      ta_err /= 15e3f;                             // Convert from normalized frequency to seconds
-      ta_err *= 1e6f;                              // Convert to micro-seconds
-      ta_err     = roundf(ta_err * 10.0f) / 10.0f; // Round to one tenth of micro-second
-      res->ta_us = ta_err;
-    } else {
-      res->ta_us = 0.0f;
-    }
-  }
-
-  if (res->ce != NULL) {
-    uint32_t n_prb[2] = {};
-
-    /* TODO: Currently averaging entire slot, performance good enough? */
-    for (int ns = 0; ns < 2; ns++) {
-      // Average all slot
-      for (int i = 1; i < n_rs; i++) {
-        srsran_vec_sum_ccc(&q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
-                           &q->pilot_estimates[(i + ns * n_rs) * SRSRAN_NRE],
-                           &q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
-                           SRSRAN_NRE);
+      // Calculate actual time alignment error in micro-seconds
+      if (isnormal(ta_err)) {
+        ta_err /= 15e3f;                              // Convert from normalized frequency to seconds
+        ta_err *= 1e6f;                               // Convert to micro-seconds
+        ta_err        = roundf(ta_err * 10.0f) / 10.0f; // Round to one tenth of micro-second
+        meas[a].ta_us = ta_err;
       }
-      srsran_vec_sc_prod_ccc(&q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
-                             (float)1.0 / n_rs,
+    }
+
+    if (res->ce[a] != NULL) {
+      uint32_t n_prb[2] = {};
+
+      /* TODO: Currently averaging entire slot, performance good enough? */
+      for (int ns = 0; ns < 2; ns++) {
+        // Average all slot
+        for (int i = 1; i < n_rs; i++) {
+          srsran_vec_sum_ccc(&q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
+                             &q->pilot_estimates[(i + ns * n_rs) * SRSRAN_NRE],
                              &q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
                              SRSRAN_NRE);
+        }
+        srsran_vec_sc_prod_ccc(&q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
+                               (float)1.0 / n_rs,
+                               &q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
+                               SRSRAN_NRE);
 
-      // Average in freq domain
-      srsran_chest_average_pilots(&q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
-                                  &q->pilot_recv_signal[ns * n_rs * SRSRAN_NRE],
-                                  q->smooth_filter,
-                                  SRSRAN_NRE,
-                                  1,
-                                  q->smooth_filter_len);
+        // Average in freq domain
+        srsran_chest_average_pilots(&q->pilot_estimates[ns * n_rs * SRSRAN_NRE],
+                                    &q->pilot_recv_signal[ns * n_rs * SRSRAN_NRE],
+                                    q->smooth_filter,
+                                    SRSRAN_NRE,
+                                    1,
+                                    q->smooth_filter_len);
 
-      // Determine n_prb
-      n_prb[ns] = srsran_pucch_n_prb(&q->cell, cfg, ns);
+        // Determine n_prb
+        n_prb[ns] = srsran_pucch_n_prb(&q->cell, cfg, ns);
 
-      // copy estimates to slot
-      for (int i = 0; i < SRSRAN_CP_NSYMB(q->cell.cp); i++) {
-        srsran_vec_cf_copy(
-            &res->ce[SRSRAN_RE_IDX(q->cell.nof_prb, i + ns * SRSRAN_CP_NSYMB(q->cell.cp), n_prb[ns] * SRSRAN_NRE)],
-            &q->pilot_recv_signal[ns * n_rs * SRSRAN_NRE],
-            SRSRAN_NRE);
+        // copy estimates to slot
+        for (int i = 0; i < SRSRAN_CP_NSYMB(q->cell.cp); i++) {
+          srsran_vec_cf_copy(&res->ce[a][SRSRAN_RE_IDX(
+                                 q->cell.nof_prb, i + ns * SRSRAN_CP_NSYMB(q->cell.cp), n_prb[ns] * SRSRAN_NRE)],
+                             &q->pilot_recv_signal[ns * n_rs * SRSRAN_NRE],
+                             SRSRAN_NRE);
+        }
+      }
+
+      // Estimate noise/interference
+      meas[a].noise_estimate = estimate_noise_pilots_pucch(q, res->ce[a], n_rs, n_prb);
+      if (fpclassify(meas[a].noise_estimate) == FP_ZERO) {
+        meas[a].noise_estimate = FLT_MIN;
       }
     }
-
-    // Estimate noise/interference
-    res->noise_estimate = estimate_noise_pilots_pucch(q, res->ce, n_rs, n_prb);
-    if (fpclassify(res->noise_estimate) == FP_ZERO) {
-      res->noise_estimate = FLT_MIN;
-    }
-    res->noise_estimate_dbFs = srsran_convert_power_to_dBm(res->noise_estimate);
-
-    // Estimate SINR
-    if (isnormal(res->noise_estimate)) {
-      res->snr    = res->epre / res->noise_estimate;
-      res->snr_db = srsran_convert_power_to_dB(res->snr);
-    } else {
-      res->snr    = NAN;
-      res->snr_db = NAN;
-    }
   }
+
+  chest_ul_combine_meas(meas, nof_antennas, res);
 
   return 0;
 }
@@ -613,7 +697,7 @@ int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
                                  srsran_ul_sf_cfg_t*                sf,
                                  srsran_refsignal_srs_cfg_t*        cfg,
                                  srsran_refsignal_dmrs_pusch_cfg_t* pusch_cfg,
-                                 cf_t*                              input,
+                                 cf_t*                              input[SRSRAN_MAX_PORTS],
                                  srsran_chest_ul_res_t*             res)
 {
   if (q == NULL || sf == NULL || cfg == NULL || pusch_cfg == NULL || input == NULL || res == NULL) {
@@ -623,11 +707,6 @@ int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
   // Extract parameters
   uint32_t n_srs_re = srsran_refsignal_srs_M_sc(&q->dmrs_signal, cfg);
 
-  // Extract Sounding Reference Signal
-  if (srsran_refsignal_srs_get(&q->dmrs_signal, cfg, sf->tti, q->pilot_recv_signal, input) != SRSRAN_SUCCESS) {
-    return SRSRAN_ERROR;
-  }
-
   // Get Known pilots
   cf_t* known_pilots = q->pilot_known_signal;
   if (q->srs_signal_configured) {
@@ -636,12 +715,28 @@ int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
     srsran_refsignal_srs_gen(&q->dmrs_signal, cfg, pusch_cfg, sf->tti % SRSRAN_NOF_SF_X_FRAME, known_pilots);
   }
 
-  // Compute least squares estimates
-  srsran_vec_prod_conj_ccc(q->pilot_recv_signal, known_pilots, q->pilot_estimates, n_srs_re);
+  uint32_t            nof_antennas           = SRSRAN_MAX(1, res->nof_rx_antennas);
+  chest_ul_ant_meas_t meas[SRSRAN_MAX_PORTS] = {};
 
-  // Estimate
-  uint32_t n_prb[2] = {};
-  chest_ul_estimate(q, 1, n_srs_re, 1, true, false, false, n_prb, res);
+  for (uint32_t a = 0; a < nof_antennas; a++) {
+    if (input[a] == NULL) {
+      return SRSRAN_ERROR_INVALID_INPUTS;
+    }
+
+    // Extract Sounding Reference Signal
+    if (srsran_refsignal_srs_get(&q->dmrs_signal, cfg, sf->tti, q->pilot_recv_signal, input[a]) != SRSRAN_SUCCESS) {
+      return SRSRAN_ERROR;
+    }
+
+    // Compute least squares estimates
+    srsran_vec_prod_conj_ccc(q->pilot_recv_signal, known_pilots, q->pilot_estimates, n_srs_re);
+
+    // Estimate
+    uint32_t n_prb[2] = {};
+    chest_ul_estimate(q, 1, n_srs_re, 1, true, false, false, n_prb, res->ce[a], &meas[a]);
+  }
+
+  chest_ul_combine_meas(meas, nof_antennas, res);
 
   return SRSRAN_SUCCESS;
 }

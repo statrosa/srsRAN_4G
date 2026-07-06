@@ -69,6 +69,7 @@ struct enb_args_t {
                       // cell eNB
   uint32_t n_prb;
   uint32_t nof_ports;
+  uint32_t nof_rx_ant;
   uint32_t transmission_mode;
   float    p_a;
 };

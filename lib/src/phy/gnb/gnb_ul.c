@@ -45,7 +45,7 @@ static int gnb_ul_alloc_prb(srsran_gnb_ul_t* q, uint32_t new_nof_prb)
     }
 
     srsran_chest_ul_res_free(&q->chest_pucch);
-    if (srsran_chest_ul_res_init(&q->chest_pucch, q->max_prb) < SRSRAN_SUCCESS) {
+    if (srsran_chest_ul_res_init(&q->chest_pucch, q->max_prb, 1) < SRSRAN_SUCCESS) {
       return SRSRAN_ERROR;
     }
 

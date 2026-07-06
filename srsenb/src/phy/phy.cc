@@ -194,7 +194,8 @@ int phy::init_lte(const phy_args_t&            args,
                stack_lte_,
                phy_log,
                PRACH_WORKER_THREAD_PRIO,
-               args.nof_prach_threads);
+               args.nof_prach_threads,
+               args.nof_rx_ant);
   }
   prach.set_max_prach_offset_us(args.max_prach_offset_us);
 

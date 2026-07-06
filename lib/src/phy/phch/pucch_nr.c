@@ -533,7 +533,7 @@ int srsran_pucch_nr_format1_decode(srsran_pucch_nr_t*                  q,
     for (uint32_t m = 0; m < n_pucch; m++, l += 2) {
       // Get start of the sequence in resource grid
       cf_t* slot_symbols_ptr = &slot_symbols[(q->carrier.nof_prb * (l + l_prime) + starting_prb) * SRSRAN_NRE];
-      cf_t* ce_ptr           = &chest_res->ce[SRSRAN_NRE * n_pucch_sum];
+      cf_t* ce_ptr           = &chest_res->ce[0][SRSRAN_NRE * n_pucch_sum];
       n_pucch_sum++;
 
       if (SRSRAN_DEBUG_ENABLED && get_srsran_verbose_level() >= SRSRAN_VERBOSE_INFO && !is_handler_registered()) {
@@ -698,7 +698,7 @@ static int pucch_nr_format2_decode(srsran_pucch_nr_t*                  q,
   uint32_t k_end   = (resource->starting_prb + resource->nof_prb) * SRSRAN_NRE;
   for (uint32_t l = l_start, i = 0; l < l_end; l++) {
     cf_t* symbol_ptr = &slot_symbols[l * carrier->nof_prb * SRSRAN_NRE];
-    cf_t* ce_ptr     = &chest_res->ce[l * carrier->nof_prb * SRSRAN_NRE];
+    cf_t* ce_ptr     = &chest_res->ce[0][l * carrier->nof_prb * SRSRAN_NRE];
     for (uint32_t k = k_start; k < k_end; k += 3) {
       q->d[i]  = symbol_ptr[k];
       q->ce[i] = ce_ptr[k];

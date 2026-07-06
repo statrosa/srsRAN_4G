@@ -91,8 +91,10 @@ typedef struct SRSRAN_API {
   cf_t*  ifft_in;
   cf_t*  ifft_out;
   cf_t*  prach_bins;
+  cf_t*  prach_bins_m[SRSRAN_MAX_PORTS]; // Per RX-antenna frequency bins; index 0 aliases prach_bins
   cf_t*  corr_spec;
   float* corr;
+  float* corr_tmp; // Scratch for accumulating the PDP over RX antennas
 
   // PRACH IFFT
   srsran_dft_plan_t fft;
@@ -234,6 +236,18 @@ SRSRAN_API int srsran_prach_detect_offset(srsran_prach_t* p,
                                           float*          peak_to_avg,
                                           uint32_t*       ind_len);
 
+/* Multi-antenna detection: the correlation power-delay profiles of all RX antennas are combined non-coherently
+ * before the peak search. */
+SRSRAN_API int srsran_prach_detect_offset_multi(srsran_prach_t* p,
+                                                uint32_t        freq_offset,
+                                                cf_t*           signals[SRSRAN_MAX_PORTS],
+                                                uint32_t        nof_rx_antennas,
+                                                uint32_t        sig_len,
+                                                uint32_t*       indices,
+                                                float*          t_offsets,
+                                                float*          peak_to_avg,
+                                                uint32_t*       ind_len);
+
 SRSRAN_API void srsran_prach_set_detect_factor(srsran_prach_t* p, float factor);
 
 SRSRAN_API int srsran_prach_free(srsran_prach_t* p);
@@ -247,6 +261,7 @@ SRSRAN_API int srsran_prach_process(srsran_prach_t* p,
                                     float*          peak_to_avg,
                                     uint32_t*       n_indices,
                                     int             cancellation_idx,
+                                    uint32_t        nof_rx_antennas,
                                     uint32_t        begin,
                                     uint32_t        sig_len);
 

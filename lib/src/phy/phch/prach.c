@@ -567,8 +567,14 @@ int srsran_prach_init(srsran_prach_t* p, uint32_t max_N_ifft_ul)
     p->prach_bins = srsran_vec_cf_malloc(SRSRAN_PRACH_N_ZC_LONG);
     p->corr_spec  = srsran_vec_cf_malloc(SRSRAN_PRACH_N_ZC_LONG);
     p->corr       = srsran_vec_f_malloc(SRSRAN_PRACH_N_ZC_LONG);
+    p->corr_tmp   = srsran_vec_f_malloc(SRSRAN_PRACH_N_ZC_LONG);
     p->cross      = srsran_vec_cf_malloc(SRSRAN_PRACH_N_ZC_LONG);
     p->corr_freq  = srsran_vec_cf_malloc(SRSRAN_PRACH_N_ZC_LONG);
+
+    p->prach_bins_m[0] = p->prach_bins;
+    for (uint32_t a = 1; a < SRSRAN_MAX_PORTS; a++) {
+      p->prach_bins_m[a] = srsran_vec_cf_malloc(SRSRAN_PRACH_N_ZC_LONG);
+    }
 
     // Set up ZC FFTS
     if (srsran_dft_plan(&p->zc_fft, SRSRAN_PRACH_N_ZC_LONG, SRSRAN_DFT_FORWARD, SRSRAN_DFT_COMPLEX)) {
@@ -874,26 +880,38 @@ int srsran_prach_process(srsran_prach_t* p,
                          float*          peak_to_avg,
                          uint32_t*       n_indices,
                          int             cancellation_idx,
+                         uint32_t        nof_rx_antennas,
                          uint32_t        begin,
                          uint32_t        sig_len)
 {
   float max_to_cancel = 0;
   cancellation_idx    = -1;
   int max_idx         = 0;
+  nof_rx_antennas     = SRSRAN_MAX(1, SRSRAN_MIN(nof_rx_antennas, SRSRAN_MAX_PORTS));
   srsran_vec_cf_zero(p->cross, p->N_zc);
   srsran_vec_cf_zero(p->corr_freq, p->N_zc);
   for (int i = 0; i < p->num_ra_preambles; i++) {
     cf_t* root_spec = get_precoded_dft(p, p->root_seqs_idx[i]);
 
-    srsran_vec_prod_conj_ccc(p->prach_bins, root_spec, p->corr_spec, p->N_zc);
+    // Accumulate the correlation power-delay profile non-coherently over RX antennas
+    for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+      srsran_vec_prod_conj_ccc(p->prach_bins_m[a], root_spec, p->corr_spec, p->N_zc);
 
-    srsran_vec_prod_conj_ccc(p->corr_spec, &p->corr_spec[1], p->cross, p->N_zc - 1);
-    if (p->successive_cancellation) {
-      srsran_vec_cf_copy(p->corr_freq, p->corr_spec, p->N_zc);
+      if (a == 0) {
+        srsran_vec_prod_conj_ccc(p->corr_spec, &p->corr_spec[1], p->cross, p->N_zc - 1);
+        if (p->successive_cancellation) {
+          srsran_vec_cf_copy(p->corr_freq, p->corr_spec, p->N_zc);
+        }
+      }
+      srsran_dft_run(&p->zc_ifft, p->corr_spec, p->corr_spec);
+
+      if (a == 0) {
+        srsran_vec_abs_square_cf(p->corr_spec, p->corr, p->N_zc);
+      } else {
+        srsran_vec_abs_square_cf(p->corr_spec, p->corr_tmp, p->N_zc);
+        srsran_vec_sum_fff(p->corr, p->corr_tmp, p->corr, p->N_zc);
+      }
     }
-    srsran_dft_run(&p->zc_ifft, p->corr_spec, p->corr_spec);
-
-    srsran_vec_abs_square_cf(p->corr_spec, p->corr, p->N_zc);
 
     float corr_ave = srsran_vec_acc_ff(p->corr, p->N_zc) / p->N_zc;
 
@@ -975,17 +993,35 @@ int srsran_prach_detect_offset(srsran_prach_t* p,
                                float*          peak_to_avg,
                                uint32_t*       n_indices)
 {
+  cf_t* signals[SRSRAN_MAX_PORTS] = {signal};
+  return srsran_prach_detect_offset_multi(p, freq_offset, signals, 1, sig_len, indices, t_offsets, peak_to_avg, n_indices);
+}
+
+int srsran_prach_detect_offset_multi(srsran_prach_t* p,
+                                     uint32_t        freq_offset,
+                                     cf_t*           signals[SRSRAN_MAX_PORTS],
+                                     uint32_t        nof_rx_antennas,
+                                     uint32_t        sig_len,
+                                     uint32_t*       indices,
+                                     float*          t_offsets,
+                                     float*          peak_to_avg,
+                                     uint32_t*       n_indices)
+{
   int ret = SRSRAN_ERROR;
-  if (p != NULL && signal != NULL && sig_len > 0 && indices != NULL) {
+  if (p != NULL && signals != NULL && sig_len > 0 && indices != NULL && nof_rx_antennas >= 1 &&
+      nof_rx_antennas <= SRSRAN_MAX_PORTS) {
     if (sig_len < p->N_ifft_prach) {
       ERROR("srsran_prach_detect: Signal length is %d and should be %d", sig_len, p->N_ifft_prach);
       return SRSRAN_ERROR_INVALID_INPUTS;
     }
+
+    // Successive cancellation reconstructs and subtracts in a single set of bins; restrict it to one antenna
+    if (p->successive_cancellation && nof_rx_antennas > 1) {
+      nof_rx_antennas = 1;
+    }
+
     int cancellation_idx = -2;
     bzero(&p->prach_cancel, sizeof(srsran_prach_cancellation_t));
-
-    // FFT incoming signal
-    srsran_dft_run(&p->fft, signal, p->signal_fft);
 
     *n_indices = 0;
 
@@ -995,13 +1031,23 @@ int srsran_prach_detect_offset(srsran_prach_t* p,
     uint32_t K       = DELTA_F / DELTA_F_RA;
     uint32_t begin   = PHI + (K * k_0) + (p->is_nr ? 0 : (K / 2));
 
-    memcpy(p->prach_bins, &p->signal_fft[begin], p->N_zc * sizeof(cf_t));
+    for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+      if (signals[a] == NULL) {
+        return SRSRAN_ERROR_INVALID_INPUTS;
+      }
+
+      // FFT incoming signal
+      srsran_dft_run(&p->fft, signals[a], p->signal_fft);
+
+      memcpy(p->prach_bins_m[a], &p->signal_fft[begin], p->N_zc * sizeof(cf_t));
+    }
+
     int loops = (p->successive_cancellation) ? SUCCESSIVE_CANCELLATION_ITS : 1;
     // if successive cancellation is enabled, we perform the entire search process p->num_ra_preambles times, removing
     // the highest power PRACH preamble each time.
     for (int l = 0; l < loops; l++) {
       if (srsran_prach_process(
-              p, signal, indices, t_offsets, peak_to_avg, n_indices, cancellation_idx, begin, sig_len)) {
+              p, signals[0], indices, t_offsets, peak_to_avg, n_indices, cancellation_idx, nof_rx_antennas, begin, sig_len)) {
         break;
       }
     }
@@ -1014,8 +1060,12 @@ int srsran_prach_detect_offset(srsran_prach_t* p,
 int srsran_prach_free(srsran_prach_t* p)
 {
   free(p->prach_bins);
+  for (uint32_t a = 1; a < SRSRAN_MAX_PORTS; a++) {
+    free(p->prach_bins_m[a]);
+  }
   free(p->corr_spec);
   free(p->corr);
+  free(p->corr_tmp);
   srsran_dft_plan_free(&p->ifft);
   free(p->ifft_in);
   free(p->ifft_out);

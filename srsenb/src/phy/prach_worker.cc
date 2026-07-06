@@ -29,12 +29,27 @@ int prach_worker::init(const srsran_cell_t&      cell_,
                        const srsran_prach_cfg_t& prach_cfg_,
                        stack_interface_phy_lte*  stack_,
                        int                       priority,
-                       uint32_t                  nof_workers_)
+                       uint32_t                  nof_workers_,
+                       uint32_t                  nof_rx_antennas_)
 {
   stack       = stack_;
   prach_cfg   = prach_cfg_;
   cell        = cell_;
   nof_workers = nof_workers_;
+  nof_rx_ant  = SRSRAN_MAX(1, SRSRAN_MIN(nof_rx_antennas_, SRSRAN_MAX_PORTS));
+
+  // Pre-size the sample buffers of the entire pool to avoid allocations in the data path
+  {
+    std::vector<sf_buffer*> tmp;
+    for (sf_buffer* b = buffer_pool.allocate(nullptr, false); b != nullptr;
+         b            = buffer_pool.allocate(nullptr, false)) {
+      b->ensure_antennas(nof_rx_ant);
+      tmp.push_back(b);
+    }
+    for (sf_buffer* b : tmp) {
+      buffer_pool.deallocate(b);
+    }
+  }
 
   max_prach_offset_us = 50;
 
@@ -96,7 +111,7 @@ void prach_worker::set_max_prach_offset_us(float delay_us)
   max_prach_offset_us = delay_us;
 }
 
-int prach_worker::new_tti(uint32_t tti_rx, cf_t* buffer_rx)
+int prach_worker::new_tti(uint32_t tti_rx, cf_t* buffer_rx[SRSRAN_MAX_PORTS])
 {
   // Save buffer only if it's a PRACH TTI
   if (srsran_prach_tti_opportunity(&prach, tti_rx, -1) || sf_cnt) {
@@ -112,9 +127,17 @@ int prach_worker::new_tti(uint32_t tti_rx, cf_t* buffer_rx)
       return -1;
     }
     if (current_buffer->nof_samples + SRSRAN_SF_LEN_PRB(cell.nof_prb) < sf_buffer_sz) {
-      memcpy(&current_buffer->samples[sf_cnt * SRSRAN_SF_LEN_PRB(cell.nof_prb)],
-             buffer_rx,
-             sizeof(cf_t) * SRSRAN_SF_LEN_PRB(cell.nof_prb));
+      current_buffer->ensure_antennas(nof_rx_ant);
+      for (uint32_t a = 0; a < nof_rx_ant; a++) {
+        if (buffer_rx[a] != nullptr) {
+          memcpy(&current_buffer->samples[a][sf_cnt * SRSRAN_SF_LEN_PRB(cell.nof_prb)],
+                 buffer_rx[a],
+                 sizeof(cf_t) * SRSRAN_SF_LEN_PRB(cell.nof_prb));
+        } else {
+          srsran_vec_cf_zero(&current_buffer->samples[a][sf_cnt * SRSRAN_SF_LEN_PRB(cell.nof_prb)],
+                             SRSRAN_SF_LEN_PRB(cell.nof_prb));
+        }
+      }
       current_buffer->nof_samples += SRSRAN_SF_LEN_PRB(cell.nof_prb);
       if (sf_cnt == 0) {
         current_buffer->tti = tti_rx;
@@ -142,15 +165,20 @@ int prach_worker::run_tti(sf_buffer* b)
 {
   uint32_t prach_nof_det = 0;
   if (srsran_prach_tti_opportunity(&prach, b->tti, -1)) {
+    cf_t* signals[SRSRAN_MAX_PORTS] = {};
+    for (uint32_t a = 0; a < nof_rx_ant; a++) {
+      signals[a] = &b->samples[a][prach.N_cp];
+    }
     // Detect possible PRACHs
-    if (srsran_prach_detect_offset(&prach,
-                                   prach_cfg.freq_offset,
-                                   &b->samples[prach.N_cp],
-                                   nof_sf * SRSRAN_SF_LEN_PRB(cell.nof_prb) - prach.N_cp,
-                                   prach_indices,
-                                   prach_offsets,
-                                   prach_p2avg,
-                                   &prach_nof_det)) {
+    if (srsran_prach_detect_offset_multi(&prach,
+                                         prach_cfg.freq_offset,
+                                         signals,
+                                         nof_rx_ant,
+                                         nof_sf * SRSRAN_SF_LEN_PRB(cell.nof_prb) - prach.N_cp,
+                                         prach_indices,
+                                         prach_offsets,
+                                         prach_p2avg,
+                                         &prach_nof_det)) {
       logger.error("Error detecting PRACH");
       return SRSRAN_ERROR;
     }
@@ -174,7 +202,7 @@ int prach_worker::run_tti(sf_buffer* b)
 
 #if defined(ENABLE_GUI) and ENABLE_PRACH_GUI
           uint32_t nof_samples = SRSRAN_MIN(nof_sf * SRSRAN_SF_LEN_PRB(cell.nof_prb), 3 * SRSRAN_SF_LEN_MAX);
-          srsran_vec_abs_cf(b->samples, plot_buffer.data(), nof_samples);
+          srsran_vec_abs_cf(b->samples[0].data(), plot_buffer.data(), nof_samples);
           plot_real_setNewData(&plot_real, plot_buffer.data(), nof_samples);
 #endif // defined(ENABLE_GUI) and ENABLE_PRACH_GUI
         }

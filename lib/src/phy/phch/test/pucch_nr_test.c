@@ -335,7 +335,7 @@ int main(int argc, char** argv)
     goto clean_exit;
   }
 
-  if (srsran_chest_ul_res_init(&chest_res, carrier.nof_prb)) {
+  if (srsran_chest_ul_res_init(&chest_res, carrier.nof_prb, 1)) {
     ERROR("Chest UL");
     goto clean_exit;
   }

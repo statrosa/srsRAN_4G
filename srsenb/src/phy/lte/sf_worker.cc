@@ -240,7 +240,7 @@ void sf_worker::work_imp()
   // Set or combine RF ports
   for (uint32_t cc = 0; cc < phy->get_nof_carriers_lte(); cc++) {
     for (uint32_t ant = 0; ant < phy->get_nof_ports(0); ant++) {
-      tx_buffer.set_combine(phy->get_rf_port(cc), ant, phy->get_nof_ports(0), cc_workers[cc]->get_buffer_tx(ant));
+      tx_buffer.set_combine(phy->get_rf_port(cc), ant, phy->get_rf_ant_stride(), cc_workers[cc]->get_buffer_tx(ant));
     }
   }
 

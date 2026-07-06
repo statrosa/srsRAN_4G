@@ -106,7 +106,7 @@ int srs_test_context_init(srs_test_context_t* q)
   }
 
   // Initialise UL channel estimator result
-  if (srsran_chest_ul_res_init(&q->chest_ul_res, SRSRAN_MAX_PRB) != SRSRAN_SUCCESS) {
+  if (srsran_chest_ul_res_init(&q->chest_ul_res, SRSRAN_MAX_PRB, 1) != SRSRAN_SUCCESS) {
     return SRSRAN_ERROR;
   }
 
@@ -152,8 +152,9 @@ int srs_test_context_run(srs_test_context_t* q)
   }
 
   // Estimate
+  cf_t* sf_symbols_rx[SRSRAN_MAX_PORTS] = {q->sf_symbols};
   TESTASSERT(srsran_chest_ul_estimate_srs(
-                 &q->chest_ul, &ul_sf_cfg, &srs_cfg, &dmrs_pusch_cfg, q->sf_symbols, &q->chest_ul_res) ==
+                 &q->chest_ul, &ul_sf_cfg, &srs_cfg, &dmrs_pusch_cfg, sf_symbols_rx, &q->chest_ul_res) ==
              SRSRAN_SUCCESS);
 
   INFO("RESULTS: tti=%d; snr_db=%+.1f; noise_estimate_dbm=%+.1f; ta_us=%+.1f;",

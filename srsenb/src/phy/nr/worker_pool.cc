@@ -87,8 +87,9 @@ void worker_pool::start_worker(slot_worker* w)
   // Push worker into synchronization queue
   slot_sync.push(w);
 
-  // Feed PRACH detection before start processing
-  prach.new_tti(0, current_tti, w->get_buffer_rx(0));
+  // Feed PRACH detection before start processing (NR PRACH uses a single RX antenna)
+  cf_t* prach_buffer[SRSRAN_MAX_PORTS] = {w->get_buffer_rx(0)};
+  prach.new_tti(0, current_tti, prach_buffer);
 
   // Start actual worker
   pool.start_worker(w);
@@ -138,7 +139,7 @@ int worker_pool::set_common_cfg(const phy_interface_rrc_nr::common_cfg_t& common
   prach_cfg.tdd_config.configured = (common_cfg.duplex_mode == SRSRAN_DUPLEX_MODE_TDD);
 
   // Set the PRACH configuration
-  prach.init(0, cell, prach_cfg, &prach_stack_adaptor, logger, 0, nof_prach_workers);
+  prach.init(0, cell, prach_cfg, &prach_stack_adaptor, logger, 0, nof_prach_workers, 1);
   prach.set_max_prach_offset_us(1000);
 
   // Setup SSB sampling rate and scaling

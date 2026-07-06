@@ -166,9 +166,9 @@ void txrx::run_thread()
       for (uint32_t cc_lte = 0; cc_lte < worker_com->get_nof_carriers_lte(); cc_lte++, cc++) {
         uint32_t rf_port = worker_com->get_rf_port(cc);
 
-        for (uint32_t p = 0; p < worker_com->get_nof_ports(cc); p++) {
+        for (uint32_t p = 0; p < worker_com->get_nof_rx_ant(); p++) {
           // WARNING: The number of ports for all cells must be the same
-          buffer.set(rf_port, p, worker_com->get_nof_ports(0), lte_worker->get_buffer_rx(cc_lte, p));
+          buffer.set(rf_port, p, worker_com->get_rf_ant_stride(), lte_worker->get_buffer_rx(cc_lte, p));
         }
       }
       for (uint32_t cc_nr = 0; cc_nr < worker_com->get_nof_carriers_nr(); cc_nr++, cc++) {
@@ -179,7 +179,7 @@ void txrx::run_thread()
           // - The number of ports for all cells must be the same
           // - Only one NR cell is currently supported
           if (nr_worker != nullptr) {
-            buffer.set(rf_port, p, worker_com->get_nof_ports(0), nr_worker->get_buffer_rx(p));
+            buffer.set(rf_port, p, worker_com->get_rf_ant_stride(), nr_worker->get_buffer_rx(p));
           }
         }
       }
@@ -203,7 +203,11 @@ void txrx::run_thread()
 
     // Trigger prach worker execution
     for (uint32_t cc = 0; cc < worker_com->get_nof_carriers_lte(); cc++) {
-      prach->new_tti(cc, tti, buffer.get(worker_com->get_rf_port(cc), 0, worker_com->get_nof_ports(0)));
+      cf_t* prach_buffer[SRSRAN_MAX_PORTS] = {};
+      for (uint32_t a = 0; a < worker_com->get_nof_rx_ant(); a++) {
+        prach_buffer[a] = buffer.get(worker_com->get_rf_port(cc), a, worker_com->get_rf_ant_stride());
+      }
+      prach->new_tti(cc, tti, prach_buffer);
     }
 
     // Set NR worker context and start

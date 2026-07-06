@@ -47,7 +47,8 @@
 #include "srsran/phy/resampling/interp.h"
 
 typedef struct SRSRAN_API {
-  cf_t*    ce;
+  cf_t*    ce[SRSRAN_MAX_PORTS]; ///< Per RX-antenna channel estimates
+  uint32_t nof_rx_antennas;      ///< Number of valid entries in ce
   uint32_t nof_re;
   float    noise_estimate;
   float    noise_estimate_dbFs;
@@ -93,7 +94,7 @@ SRSRAN_API int srsran_chest_ul_init(srsran_chest_ul_t* q, uint32_t max_prb);
 
 SRSRAN_API void srsran_chest_ul_free(srsran_chest_ul_t* q);
 
-SRSRAN_API int srsran_chest_ul_res_init(srsran_chest_ul_res_t* q, uint32_t max_prb);
+SRSRAN_API int srsran_chest_ul_res_init(srsran_chest_ul_res_t* q, uint32_t max_prb, uint32_t nof_rx_antennas);
 
 SRSRAN_API void srsran_chest_ul_res_set_identity(srsran_chest_ul_res_t* q);
 
@@ -108,20 +109,20 @@ SRSRAN_API void srsran_chest_ul_pregen(srsran_chest_ul_t*                 q,
 SRSRAN_API int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                                               srsran_ul_sf_cfg_t*    sf,
                                               srsran_pusch_cfg_t*    cfg,
-                                              cf_t*                  input,
+                                              cf_t*                  input[SRSRAN_MAX_PORTS],
                                               srsran_chest_ul_res_t* res);
 
 SRSRAN_API int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
                                               srsran_ul_sf_cfg_t*    sf,
                                               srsran_pucch_cfg_t*    cfg,
-                                              cf_t*                  input,
+                                              cf_t*                  input[SRSRAN_MAX_PORTS],
                                               srsran_chest_ul_res_t* res);
 
 SRSRAN_API int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
                                             srsran_ul_sf_cfg_t*                sf,
                                             srsran_refsignal_srs_cfg_t*        cfg,
                                             srsran_refsignal_dmrs_pusch_cfg_t* pusch_cfg,
-                                            cf_t*                              input,
+                                            cf_t*                              input[SRSRAN_MAX_PORTS],
                                             srsran_chest_ul_res_t*             res);
 
 #endif // SRSRAN_CHEST_UL_H

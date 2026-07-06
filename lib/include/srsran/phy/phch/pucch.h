@@ -67,6 +67,7 @@ typedef struct SRSRAN_API {
 
   srsran_sequence_t seq_f2;
   bool              is_ue;
+  uint32_t          nof_rx_antennas;
 
   int16_t  llr[SRSRAN_PUCCH3_NOF_BITS];
   uint8_t  bits_scram[SRSRAN_PUCCH_MAX_BITS];
@@ -75,8 +76,8 @@ typedef struct SRSRAN_API {
   uint32_t f_gh[SRSRAN_NSLOTS_X_FRAME];
 
   cf_t* z;
-  cf_t* z_tmp;
-  cf_t* ce;
+  cf_t* z_tmp[SRSRAN_MAX_PORTS];
+  cf_t* ce[SRSRAN_MAX_PORTS];
 
 } srsran_pucch_t;
 
@@ -96,7 +97,7 @@ typedef struct SRSRAN_API {
 
 SRSRAN_API int srsran_pucch_init_ue(srsran_pucch_t* q);
 
-SRSRAN_API int srsran_pucch_init_enb(srsran_pucch_t* q);
+SRSRAN_API int srsran_pucch_init_enb(srsran_pucch_t* q, uint32_t nof_rx_antennas);
 
 SRSRAN_API void srsran_pucch_free(srsran_pucch_t* q);
 
@@ -116,7 +117,7 @@ SRSRAN_API int srsran_pucch_decode(srsran_pucch_t*        q,
                                    srsran_ul_sf_cfg_t*    sf,
                                    srsran_pucch_cfg_t*    cfg,
                                    srsran_chest_ul_res_t* channel,
-                                   cf_t*                  sf_symbols,
+                                   cf_t*                  sf_symbols[SRSRAN_MAX_PORTS],
                                    srsran_pucch_res_t*    data);
 
 /* Other utilities. These functions do not modify the state and run in real-time */

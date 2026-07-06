@@ -107,12 +107,15 @@ public:
 
     return ret;
   }
+  uint32_t get_nof_rx_ant() { return SRSRAN_MAX(1, params.nof_rx_ant); }
+  // Stride between logical carriers in the RF buffer; must match the radio's nof_antennas
+  uint32_t get_rf_ant_stride() { return SRSRAN_MAX(get_nof_ports(0), get_nof_rx_ant()); }
   uint32_t get_nof_rf_channels()
   {
     uint32_t count = 0;
 
     for (auto& cell : cell_list_lte) {
-      count += cell.cell.nof_ports;
+      count += SRSRAN_MAX(cell.cell.nof_ports, get_nof_rx_ant());
     }
 
     for (auto& cell : cell_list_nr) {

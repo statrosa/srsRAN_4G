@@ -165,7 +165,7 @@ int main(int argc, char** argv)
     ERROR("Error creating PDSCH object");
     exit(-1);
   }
-  if (srsran_pucch_init_enb(&pucch_enb)) {
+  if (srsran_pucch_init_enb(&pucch_enb, 1)) {
     ERROR("Error creating PDSCH object");
     exit(-1);
   }
@@ -183,7 +183,7 @@ int main(int argc, char** argv)
     goto quit;
   }
 
-  if (srsran_chest_ul_res_init(&chest_res, cell.nof_prb) < SRSRAN_SUCCESS) {
+  if (srsran_chest_ul_res_init(&chest_res, cell.nof_prb, 1) < SRSRAN_SUCCESS) {
     ERROR("Error initiating channel estimator result");
     goto quit;
   }
@@ -277,13 +277,16 @@ int main(int argc, char** argv)
 
           // Decode PUCCH signals
           gettimeofday(&t[1], NULL);
-          if (srsran_chest_ul_estimate_pucch(&chest, &ul_sf, &pucch_cfg, sf_symbols, &chest_res) < SRSRAN_SUCCESS) {
+          cf_t* sf_symbols_rx[SRSRAN_MAX_PORTS] = {sf_symbols};
+          if (srsran_chest_ul_estimate_pucch(&chest, &ul_sf, &pucch_cfg, sf_symbols_rx, &chest_res) <
+              SRSRAN_SUCCESS) {
             ERROR("Error estimating PUCCH channel");
             goto quit;
           }
 
           srsran_pucch_res_t res = {};
-          if (srsran_pucch_decode(&pucch_enb, &ul_sf, &pucch_cfg, &chest_res, sf_symbols, &res) < SRSRAN_SUCCESS) {
+          if (srsran_pucch_decode(&pucch_enb, &ul_sf, &pucch_cfg, &chest_res, sf_symbols_rx, &res) <
+              SRSRAN_SUCCESS) {
             ERROR("Error decoding PUCCH");
             goto quit;
           }

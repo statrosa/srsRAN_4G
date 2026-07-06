@@ -28,6 +28,8 @@
 #include "srsran/interfaces/enb_phy_interfaces.h"
 #include "srsran/srslog/srslog.h"
 #include <atomic>
+#include <array>
+#include <vector>
 
 // Setting ENABLE_PRACH_GUI to non zero enables a GUI showing signal received in the PRACH window.
 #define ENABLE_PRACH_GUI 0
@@ -53,8 +55,9 @@ public:
             const srsran_prach_cfg_t& prach_cfg_,
             stack_interface_phy_lte*  mac,
             int                       priority,
-            uint32_t                  nof_workers);
-  int  new_tti(uint32_t tti, cf_t* buffer);
+            uint32_t                  nof_workers,
+            uint32_t                  nof_rx_antennas);
+  int  new_tti(uint32_t tti, cf_t* buffer[SRSRAN_MAX_PORTS]);
   void set_max_prach_offset_us(float delay_us);
   void stop();
 
@@ -84,7 +87,15 @@ private:
       nof_samples = 0;
       tti         = 0;
     }
-    cf_t     samples[sf_buffer_sz] = {};
+    void ensure_antennas(uint32_t nof_antennas)
+    {
+      for (uint32_t a = 0; a < nof_antennas && a < SRSRAN_MAX_PORTS; a++) {
+        if (samples[a].size() < sf_buffer_sz) {
+          samples[a].resize(sf_buffer_sz);
+        }
+      }
+    }
+    std::array<std::vector<cf_t>, SRSRAN_MAX_PORTS> samples;
     uint32_t nof_samples           = 0;
     uint32_t tti                   = 0;
 #ifdef SRSRAN_BUFFER_POOL_LOG_ENABLED
@@ -103,6 +114,7 @@ private:
   uint32_t                 nof_sf      = 0;
   uint32_t                 sf_cnt      = 0;
   uint32_t                 nof_workers = 0;
+  uint32_t                 nof_rx_ant  = 1;
 
   void run_thread() final;
   int  run_tti(sf_buffer* b);
@@ -123,14 +135,15 @@ public:
             stack_interface_phy_lte*  mac,
             srslog::basic_logger&     logger,
             int                       priority,
-            uint32_t                  nof_workers_x_cc)
+            uint32_t                  nof_workers_x_cc,
+            uint32_t                  nof_rx_antennas)
   {
     // Create PRACH worker if required
     while (cc_idx >= prach_vec.size()) {
       prach_vec.push_back(std::unique_ptr<prach_worker>(new prach_worker(prach_vec.size(), logger)));
     }
 
-    prach_vec[cc_idx]->init(cell_, prach_cfg_, mac, priority, nof_workers_x_cc);
+    prach_vec[cc_idx]->init(cell_, prach_cfg_, mac, priority, nof_workers_x_cc, nof_rx_antennas);
   }
 
   void set_max_prach_offset_us(float delay_us)
@@ -147,7 +160,7 @@ public:
     }
   }
 
-  int new_tti(uint32_t cc_idx, uint32_t tti, cf_t* buffer)
+  int new_tti(uint32_t cc_idx, uint32_t tti, cf_t* buffer[SRSRAN_MAX_PORTS])
   {
     int ret = SRSRAN_ERROR;
     if (cc_idx < prach_vec.size()) {

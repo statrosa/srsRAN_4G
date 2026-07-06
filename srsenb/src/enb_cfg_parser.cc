@@ -2098,8 +2098,18 @@ int set_derived_args(all_args_t* args_, rrc_cfg_t* rrc_cfg_, phy_cfg_t* phy_cfg_
     }
   }
 
-  // Patch certain args that are not exposed yet
-  args_->rf.nof_antennas = args_->enb.nof_ports;
+  // The number of UL RX antennas defaults to the number of TX ports unless overridden
+  if (args_->enb.nof_rx_ant == 0) {
+    args_->enb.nof_rx_ant = args_->enb.nof_ports;
+  }
+  if (args_->enb.nof_rx_ant > SRSRAN_MAX_PORTS) {
+    fprintf(stderr, "ERROR: Invalid number of RX antennas (%d). Maximum is %d.\n", args_->enb.nof_rx_ant, SRSRAN_MAX_PORTS);
+    return SRSRAN_ERROR;
+  }
+  args_->phy.nof_rx_ant = args_->enb.nof_rx_ant;
+
+  // The radio opens the same number of channels for TX and RX; unused TX channels transmit zeros
+  args_->rf.nof_antennas = SRSRAN_MAX(args_->enb.nof_ports, args_->enb.nof_rx_ant);
 
   // MAC needs to know the cell bandwidth to dimension softbuffers
   args_->stack.mac.nof_prb = args_->enb.n_prb;

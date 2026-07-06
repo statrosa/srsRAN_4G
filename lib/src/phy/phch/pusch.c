@@ -105,14 +105,15 @@ static int pusch_get(srsran_pusch_t* q, srsran_pusch_grant_t* grant, cf_t* input
 }
 
 /** Initializes the PDCCH transmitter and receiver */
-static int pusch_init(srsran_pusch_t* q, uint32_t max_prb, bool is_ue)
+static int pusch_init(srsran_pusch_t* q, uint32_t max_prb, bool is_ue, uint32_t nof_rx_antennas)
 {
   int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
-  if (q != NULL) {
+  if (q != NULL && nof_rx_antennas >= 1 && nof_rx_antennas <= SRSRAN_MAX_PORTS) {
     bzero(q, sizeof(srsran_pusch_t));
-    ret       = SRSRAN_ERROR;
-    q->max_re = max_prb * MAX_PUSCH_RE(SRSRAN_CP_NORM);
+    ret                = SRSRAN_ERROR;
+    q->max_re          = max_prb * MAX_PUSCH_RE(SRSRAN_CP_NORM);
+    q->nof_rx_antennas = nof_rx_antennas;
 
     INFO("Init PUSCH: %d PRBs", max_prb);
 
@@ -143,16 +144,20 @@ static int pusch_init(srsran_pusch_t* q, uint32_t max_prb, bool is_ue)
     if (!q->g) {
       goto clean;
     }
-    q->d = srsran_vec_cf_malloc(q->max_re);
-    if (!q->d) {
-      goto clean;
+    for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+      q->d[a] = srsran_vec_cf_malloc(q->max_re);
+      if (!q->d[a]) {
+        goto clean;
+      }
     }
 
     // Allocate eNb specific buffers
     if (!q->is_ue) {
-      q->ce = srsran_vec_cf_malloc(q->max_re);
-      if (!q->ce) {
-        goto clean;
+      for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+        q->ce[a] = srsran_vec_cf_malloc(q->max_re);
+        if (!q->ce[a]) {
+          goto clean;
+        }
       }
 
       q->evm_buffer = srsran_evm_buffer_alloc(srsran_ra_tbs_from_idx(SRSRAN_RA_NOF_TBS_IDX - 1, 6));
@@ -177,12 +182,12 @@ clean:
 
 int srsran_pusch_init_ue(srsran_pusch_t* q, uint32_t max_prb)
 {
-  return pusch_init(q, max_prb, true);
+  return pusch_init(q, max_prb, true, 1);
 }
 
-int srsran_pusch_init_enb(srsran_pusch_t* q, uint32_t max_prb)
+int srsran_pusch_init_enb(srsran_pusch_t* q, uint32_t max_prb, uint32_t nof_rx_antennas)
 {
-  return pusch_init(q, max_prb, false);
+  return pusch_init(q, max_prb, false, nof_rx_antennas);
 }
 
 void srsran_pusch_free(srsran_pusch_t* q)
@@ -192,14 +197,16 @@ void srsran_pusch_free(srsran_pusch_t* q)
   if (q->q) {
     free(q->q);
   }
-  if (q->d) {
-    free(q->d);
+  for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+    if (q->d[i]) {
+      free(q->d[i]);
+    }
+    if (q->ce[i]) {
+      free(q->ce[i]);
+    }
   }
   if (q->g) {
     free(q->g);
-  }
-  if (q->ce) {
-    free(q->ce);
   }
   if (q->z) {
     free(q->z);
@@ -331,10 +338,10 @@ int srsran_pusch_encode(srsran_pusch_t*      q,
     }
 
     // Bit mapping
-    srsran_mod_modulate_bytes(&q->mod[cfg->grant.tb.mod], (uint8_t*)q->q, q->d, cfg->grant.tb.nof_bits);
+    srsran_mod_modulate_bytes(&q->mod[cfg->grant.tb.mod], (uint8_t*)q->q, q->d[0], cfg->grant.tb.nof_bits);
 
     // DFT precoding
-    srsran_dft_precoding(&q->dft_precoding, q->d, q->z, cfg->grant.L_prb, cfg->grant.nof_symb);
+    srsran_dft_precoding(&q->dft_precoding, q->d[0], q->z, cfg->grant.L_prb, cfg->grant.nof_symb);
 
     // Mapping to resource elements
     uint32_t n = pusch_put(q, &cfg->grant, q->z, sf_symbols, sf->shortened);
@@ -359,7 +366,7 @@ int srsran_pusch_decode(srsran_pusch_t*        q,
                         srsran_ul_sf_cfg_t*    sf,
                         srsran_pusch_cfg_t*    cfg,
                         srsran_chest_ul_res_t* channel,
-                        cf_t*                  sf_symbols,
+                        cf_t*                  sf_symbols[SRSRAN_MAX_PORTS],
                         srsran_pusch_res_t*    out)
 {
   int      ret = SRSRAN_ERROR_INVALID_INPUTS;
@@ -388,45 +395,60 @@ int srsran_pusch_decode(srsran_pusch_t*        q,
          cfg->grant.tb.nof_bits,
          cfg->grant.tb.rv);
 
-    /* extract symbols */
-    n = pusch_get(q, &cfg->grant, sf_symbols, q->d, sf->shortened);
-    if (n != cfg->grant.nof_re) {
-      ERROR("Error expecting %d symbols but got %d", cfg->grant.nof_re, n);
-      return SRSRAN_ERROR;
+    uint32_t nof_rx_antennas = SRSRAN_MAX(1, SRSRAN_MIN(q->nof_rx_antennas, channel->nof_rx_antennas));
+
+    float epre_sum = 0.0f;
+    for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+      if (sf_symbols[a] == NULL || channel->ce[a] == NULL) {
+        ERROR("Error RX antenna %d buffer is not initialised", a);
+        return SRSRAN_ERROR_INVALID_INPUTS;
+      }
+
+      /* extract symbols */
+      n = pusch_get(q, &cfg->grant, sf_symbols[a], q->d[a], sf->shortened);
+      if (n != cfg->grant.nof_re) {
+        ERROR("Error expecting %d symbols but got %d", cfg->grant.nof_re, n);
+        return SRSRAN_ERROR;
+      }
+
+      // Measure Energy per Resource Element
+      if (cfg->meas_epre_en) {
+        epre_sum += srsran_vec_avg_power_cf(q->d[a], n);
+      }
+
+      /* extract channel estimates */
+      n = pusch_get(q, &cfg->grant, channel->ce[a], q->ce[a], sf->shortened);
+      if (n != cfg->grant.nof_re) {
+        ERROR("Error expecting %d symbols but got %d", cfg->grant.nof_re, n);
+        return SRSRAN_ERROR;
+      }
     }
 
-    // Measure Energy per Resource Element
     if (cfg->meas_epre_en) {
-      out->epre_dbfs = srsran_convert_power_to_dB(srsran_vec_avg_power_cf(q->d, n));
+      out->epre_dbfs = srsran_convert_power_to_dB(epre_sum / nof_rx_antennas);
     } else {
       out->epre_dbfs = NAN;
     }
 
-    /* extract channel estimates */
-    n = pusch_get(q, &cfg->grant, channel->ce, q->ce, sf->shortened);
-    if (n != cfg->grant.nof_re) {
-      ERROR("Error expecting %d symbols but got %d", cfg->grant.nof_re, n);
-      return SRSRAN_ERROR;
-    }
-
-    // Equalization
-    srsran_predecoding_single(q->d, q->ce, q->z, NULL, cfg->grant.nof_re, 1.0f, channel->noise_estimate);
+    // Equalization with MRC over RX antennas
+    srsran_predecoding_single_multi(
+        q->d, q->ce, q->z, NULL, nof_rx_antennas, cfg->grant.nof_re, 1.0f, channel->noise_estimate);
 
     // DFT predecoding
-    srsran_dft_precoding(&q->dft_precoding, q->z, q->d, cfg->grant.L_prb, cfg->grant.nof_symb);
+    srsran_dft_precoding(&q->dft_precoding, q->z, q->d[0], cfg->grant.L_prb, cfg->grant.nof_symb);
 
     // Soft demodulation
     if (q->llr_is_8bit) {
-      srsran_demod_soft_demodulate_b(cfg->grant.tb.mod, q->d, q->q, cfg->grant.nof_re);
+      srsran_demod_soft_demodulate_b(cfg->grant.tb.mod, q->d[0], q->q, cfg->grant.nof_re);
     } else {
-      srsran_demod_soft_demodulate_s(cfg->grant.tb.mod, q->d, q->q, cfg->grant.nof_re);
+      srsran_demod_soft_demodulate_s(cfg->grant.tb.mod, q->d[0], q->q, cfg->grant.nof_re);
     }
 
     if (cfg->meas_evm_en && q->evm_buffer) {
       if (q->llr_is_8bit) {
-        out->evm = srsran_evm_run_b(q->evm_buffer, &q->mod[cfg->grant.tb.mod], q->d, q->q, cfg->grant.tb.nof_bits);
+        out->evm = srsran_evm_run_b(q->evm_buffer, &q->mod[cfg->grant.tb.mod], q->d[0], q->q, cfg->grant.tb.nof_bits);
       } else {
-        out->evm = srsran_evm_run_s(q->evm_buffer, &q->mod[cfg->grant.tb.mod], q->d, q->q, cfg->grant.tb.nof_bits);
+        out->evm = srsran_evm_run_s(q->evm_buffer, &q->mod[cfg->grant.tb.mod], q->d[0], q->q, cfg->grant.tb.nof_bits);
       }
     } else {
       out->evm = NAN;

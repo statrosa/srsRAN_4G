@@ -96,13 +96,16 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
   srsran_cfr_cfg_t cfr_config = phy_->get_cfr_config();
 
   // Init cell here
-  for (uint32_t p = 0; p < phy->get_nof_ports(cc_idx); p++) {
+  uint32_t nof_buffers = SRSRAN_MAX(phy->get_nof_ports(cc_idx), phy->get_nof_rx_ant());
+  for (uint32_t p = 0; p < nof_buffers; p++) {
     signal_buffer_rx[p] = srsran_vec_cf_malloc(2 * sf_len);
     if (!signal_buffer_rx[p]) {
       ERROR("Error allocating memory");
       return;
     }
     srsran_vec_cf_zero(signal_buffer_rx[p], 2 * sf_len);
+  }
+  for (uint32_t p = 0; p < phy->get_nof_ports(cc_idx); p++) {
     signal_buffer_tx[p] = srsran_vec_cf_malloc(2 * sf_len);
     if (!signal_buffer_tx[p]) {
       ERROR("Error allocating memory");
@@ -122,7 +125,7 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
     ERROR("Error setting the CFR");
     return;
   }
-  if (srsran_enb_ul_init(&enb_ul, signal_buffer_rx[0], nof_prb)) {
+  if (srsran_enb_ul_init(&enb_ul, signal_buffer_rx, nof_prb, phy->get_nof_rx_ant())) {
     ERROR("Error initiating ENB UL");
     return;
   }
@@ -708,7 +711,7 @@ int cc_worker::read_ce_abs(float* ce_abs)
   int sz = srsran_symbol_sz(phy->get_nof_prb(cc_idx));
   srsran_vec_f_zero(ce_abs, sz);
   int g = (sz - SRSRAN_NRE * phy->get_nof_prb(cc_idx)) / 2;
-  srsran_vec_abs_dB_cf(enb_ul.chest_res.ce, -80.0f, &ce_abs[g], SRSRAN_NRE * phy->get_nof_prb(cc_idx));
+  srsran_vec_abs_dB_cf(enb_ul.chest_res.ce[0], -80.0f, &ce_abs[g], SRSRAN_NRE * phy->get_nof_prb(cc_idx));
   return sz;
 }
 
@@ -717,7 +720,7 @@ int cc_worker::read_ce_arg(float* ce_arg)
   int sz = srsran_symbol_sz(phy->get_nof_prb(cc_idx));
   srsran_vec_f_zero(ce_arg, sz);
   int g = (sz - SRSRAN_NRE * phy->get_nof_prb(cc_idx)) / 2;
-  srsran_vec_arg_deg_cf(enb_ul.chest_res.ce, -80.0f, &ce_arg[g], SRSRAN_NRE * phy->get_nof_prb(cc_idx));
+  srsran_vec_arg_deg_cf(enb_ul.chest_res.ce[0], -80.0f, &ce_arg[g], SRSRAN_NRE * phy->get_nof_prb(cc_idx));
   return sz;
 }
 

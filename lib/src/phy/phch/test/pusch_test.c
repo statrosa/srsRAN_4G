@@ -235,7 +235,7 @@ int main(int argc, char** argv)
     ERROR("Error creating PUSCH object");
     goto quit;
   }
-  if (srsran_pusch_init_enb(&pusch_rx, cell.nof_prb)) {
+  if (srsran_pusch_init_enb(&pusch_rx, cell.nof_prb, 1)) {
     ERROR("Error creating PUSCH object");
     goto quit;
   }
@@ -277,7 +277,7 @@ int main(int argc, char** argv)
     goto quit;
   }
 
-  srsran_chest_ul_res_init(&chest_res, cell.nof_prb);
+  srsran_chest_ul_res_init(&chest_res, cell.nof_prb, 1);
   srsran_chest_ul_res_set_identity(&chest_res);
 
   cfg.enable_64qam     = enable_64_qam;
@@ -329,7 +329,8 @@ int main(int argc, char** argv)
     memcpy(&cfg.uci_cfg, &uci_data_tx.cfg, sizeof(srsran_uci_cfg_t));
 
     gettimeofday(&t[1], NULL);
-    int r = srsran_pusch_decode(&pusch_rx, &ul_sf, &cfg, &chest_res, sf_symbols, &pusch_res);
+    cf_t* sf_symbols_rx[SRSRAN_MAX_PORTS] = {sf_symbols};
+    int   r = srsran_pusch_decode(&pusch_rx, &ul_sf, &cfg, &chest_res, sf_symbols_rx, &pusch_res);
     gettimeofday(&t[2], NULL);
     if (r) {
       printf("Error returned while decoding\n");

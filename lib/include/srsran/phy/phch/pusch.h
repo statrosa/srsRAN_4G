@@ -52,6 +52,7 @@ typedef struct SRSRAN_API {
   bool     is_ue;
   uint16_t ue_rnti;
   uint32_t max_re;
+  uint32_t nof_rx_antennas;
 
   bool llr_is_8bit;
 
@@ -59,9 +60,9 @@ typedef struct SRSRAN_API {
 
   /* buffers */
   // void buffers are shared for tx and rx
-  cf_t* ce;
+  cf_t* ce[SRSRAN_MAX_PORTS];
   cf_t* z;
-  cf_t* d;
+  cf_t* d[SRSRAN_MAX_PORTS];
 
   void* q;
   void* g;
@@ -91,7 +92,7 @@ typedef struct SRSRAN_API {
 
 SRSRAN_API int srsran_pusch_init_ue(srsran_pusch_t* q, uint32_t max_prb);
 
-SRSRAN_API int srsran_pusch_init_enb(srsran_pusch_t* q, uint32_t max_prb);
+SRSRAN_API int srsran_pusch_init_enb(srsran_pusch_t* q, uint32_t max_prb, uint32_t nof_rx_antennas);
 
 SRSRAN_API void srsran_pusch_free(srsran_pusch_t* q);
 
@@ -116,7 +117,7 @@ SRSRAN_API int srsran_pusch_decode(srsran_pusch_t*        q,
                                    srsran_ul_sf_cfg_t*    sf,
                                    srsran_pusch_cfg_t*    cfg,
                                    srsran_chest_ul_res_t* channel,
-                                   cf_t*                  sf_symbols,
+                                   cf_t*                  sf_symbols[SRSRAN_MAX_PORTS],
                                    srsran_pusch_res_t*    data);
 
 SRSRAN_API uint32_t srsran_pusch_grant_tx_info(srsran_pusch_grant_t* grant,

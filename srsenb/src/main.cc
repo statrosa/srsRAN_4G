@@ -91,6 +91,7 @@ void parse_args(all_args_t* args, int argc, char* argv[])
     ("enb.s1c_bind_port",      bpo::value<uint16_t>(&args->stack.s1ap.s1c_bind_port)->default_value(0), "Source port for S1AP connection (0 means any)")
     ("enb.n_prb",              bpo::value<uint32_t>(&args->enb.n_prb)->default_value(25),               "Number of PRB")
     ("enb.nof_ports",          bpo::value<uint32_t>(&args->enb.nof_ports)->default_value(1),            "Number of ports")
+    ("enb.nof_rx_ant",         bpo::value<uint32_t>(&args->enb.nof_rx_ant)->default_value(0),           "Number of UL RX antennas (0 = same as nof_ports)")
     ("enb.tm",                 bpo::value<uint32_t>(&args->enb.transmission_mode)->default_value(1),    "Transmission mode (1-8)")
     ("enb.p_a",                bpo::value<float>(&args->enb.p_a)->default_value(0.0f),                  "Power allocation rho_a (-6, -4.77, -3, -1.77, 0, 1, 2, 3)")
 

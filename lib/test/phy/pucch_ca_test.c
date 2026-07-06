@@ -89,7 +89,8 @@ static int test_pucch_ca(srsran_ack_nack_feedback_mode_t ack_nack_feedback_mode,
   TESTASSERT(!srsran_ue_ul_set_cell(&ue_ul, cell));
 
   // Init eNb
-  TESTASSERT(!srsran_enb_ul_init(&enb_ul, buffer, cell.nof_prb));
+  cf_t* buffer_rx[SRSRAN_MAX_PORTS] = {buffer};
+  TESTASSERT(!srsran_enb_ul_init(&enb_ul, buffer_rx, cell.nof_prb, 1));
   TESTASSERT(!srsran_enb_ul_set_cell(&enb_ul, cell, &dmrs_pusch_cfg, NULL));
 
   // The test itself starts here

@@ -26,34 +26,37 @@
 #include <math.h>
 #include <string.h>
 
-int srsran_enb_ul_init(srsran_enb_ul_t* q, cf_t* in_buffer, uint32_t max_prb)
+int srsran_enb_ul_init(srsran_enb_ul_t* q, cf_t* in_buffer[SRSRAN_MAX_PORTS], uint32_t max_prb, uint32_t nof_rx_antennas)
 {
   int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
-  if (q != NULL) {
+  if (q != NULL && in_buffer != NULL && nof_rx_antennas >= 1 && nof_rx_antennas <= SRSRAN_MAX_PORTS) {
     ret = SRSRAN_ERROR;
 
     bzero(q, sizeof(srsran_enb_ul_t));
 
-    q->sf_symbols = srsran_vec_cf_malloc(SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM));
-    if (!q->sf_symbols) {
-      perror("malloc");
+    q->nof_rx_antennas = nof_rx_antennas;
+
+    for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+      q->sf_symbols[a] = srsran_vec_cf_malloc(SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM));
+      if (!q->sf_symbols[a]) {
+        perror("malloc");
+        goto clean_exit;
+      }
+      q->in_buffer[a] = in_buffer[a];
+    }
+
+    if (srsran_chest_ul_res_init(&q->chest_res, max_prb, nof_rx_antennas)) {
+      ERROR("Error initiating chest UL result");
       goto clean_exit;
     }
 
-    q->chest_res.ce = srsran_vec_cf_malloc(SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM));
-    if (!q->chest_res.ce) {
-      perror("malloc");
-      goto clean_exit;
-    }
-    q->in_buffer = in_buffer;
-
-    if (srsran_pucch_init_enb(&q->pucch)) {
+    if (srsran_pucch_init_enb(&q->pucch, nof_rx_antennas)) {
       ERROR("Error creating PUCCH object");
       goto clean_exit;
     }
 
-    if (srsran_pusch_init_enb(&q->pusch, max_prb)) {
+    if (srsran_pusch_init_enb(&q->pusch, max_prb, nof_rx_antennas)) {
       ERROR("Error creating PUSCH object");
       goto clean_exit;
     }
@@ -79,17 +82,17 @@ clean_exit:
 void srsran_enb_ul_free(srsran_enb_ul_t* q)
 {
   if (q) {
-    srsran_ofdm_rx_free(&q->fft);
+    for (uint32_t a = 0; a < SRSRAN_MAX_PORTS; a++) {
+      srsran_ofdm_rx_free(&q->fft[a]);
+      if (q->sf_symbols[a]) {
+        free(q->sf_symbols[a]);
+      }
+    }
     srsran_pucch_free(&q->pucch);
     srsran_pusch_free(&q->pusch);
     srsran_chest_ul_free(&q->chest);
+    srsran_chest_ul_res_free(&q->chest_res);
 
-    if (q->sf_symbols) {
-      free(q->sf_symbols);
-    }
-    if (q->chest_res.ce) {
-      free(q->chest_res.ce);
-    }
     bzero(q, sizeof(srsran_enb_ul_t));
   }
 }
@@ -107,19 +110,21 @@ int srsran_enb_ul_set_cell(srsran_enb_ul_t*                   q,
 
       srsran_ofdm_cfg_t ofdm_cfg = {};
       ofdm_cfg.nof_prb           = q->cell.nof_prb;
-      ofdm_cfg.in_buffer         = q->in_buffer;
-      ofdm_cfg.out_buffer        = q->sf_symbols;
       ofdm_cfg.cp                = q->cell.cp;
       ofdm_cfg.freq_shift_f      = -0.5f;
       ofdm_cfg.normalize         = false;
       ofdm_cfg.rx_window_offset  = 0.5f;
-      if (srsran_ofdm_rx_init_cfg(&q->fft, &ofdm_cfg)) {
-        ERROR("Error initiating FFT");
-        return SRSRAN_ERROR;
-      }
-      if (srsran_ofdm_rx_set_prb(&q->fft, q->cell.cp, q->cell.nof_prb)) {
-        ERROR("Error initiating FFT");
-        return SRSRAN_ERROR;
+      for (uint32_t a = 0; a < q->nof_rx_antennas; a++) {
+        ofdm_cfg.in_buffer  = q->in_buffer[a];
+        ofdm_cfg.out_buffer = q->sf_symbols[a];
+        if (srsran_ofdm_rx_init_cfg(&q->fft[a], &ofdm_cfg)) {
+          ERROR("Error initiating FFT");
+          return SRSRAN_ERROR;
+        }
+        if (srsran_ofdm_rx_set_prb(&q->fft[a], q->cell.cp, q->cell.nof_prb)) {
+          ERROR("Error initiating FFT");
+          return SRSRAN_ERROR;
+        }
       }
 
       if (srsran_pucch_set_cell(&q->pucch, q->cell)) {
@@ -150,7 +155,9 @@ int srsran_enb_ul_set_cell(srsran_enb_ul_t*                   q,
 
 void srsran_enb_ul_fft(srsran_enb_ul_t* q)
 {
-  srsran_ofdm_rx_sf(&q->fft);
+  for (uint32_t a = 0; a < q->nof_rx_antennas; a++) {
+    srsran_ofdm_rx_sf(&q->fft[a]);
+  }
 }
 
 static int get_pucch(srsran_enb_ul_t* q, srsran_ul_sf_cfg_t* ul_sf, srsran_pucch_cfg_t* cfg, srsran_pucch_res_t* res)

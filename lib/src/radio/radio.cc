@@ -1118,12 +1118,11 @@ bool radio::map_channels(const channel_mapping&     map,
       if (physical_idx.device_idx == device_idx) {
         cf_t* ptr = buffer.get(i, j, nof_antennas);
 
-        // Add sample offset only if it is a valid pointer
+        // Keep the default buffer (zeros for TX, dummy for RX) if this port has no buffer set
         if (ptr != nullptr) {
           ptr += sample_offset;
+          radio_buffers[physical_idx.channel_idx] = ptr;
         }
-
-        radio_buffers[physical_idx.channel_idx] = ptr;
       }
     }
   }

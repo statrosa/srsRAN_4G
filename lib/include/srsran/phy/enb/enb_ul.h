@@ -51,12 +51,13 @@
 
 typedef struct SRSRAN_API {
   srsran_cell_t cell;
+  uint32_t      nof_rx_antennas;
 
-  cf_t*                 sf_symbols;
-  cf_t*                 in_buffer;
+  cf_t*                 sf_symbols[SRSRAN_MAX_PORTS];
+  cf_t*                 in_buffer[SRSRAN_MAX_PORTS];
   srsran_chest_ul_res_t chest_res;
 
-  srsran_ofdm_t     fft;
+  srsran_ofdm_t     fft[SRSRAN_MAX_PORTS];
   srsran_chest_ul_t chest;
   srsran_pusch_t    pusch;
   srsran_pucch_t    pucch;
@@ -64,7 +65,8 @@ typedef struct SRSRAN_API {
 } srsran_enb_ul_t;
 
 /* This function shall be called just after the initial synchronization */
-SRSRAN_API int srsran_enb_ul_init(srsran_enb_ul_t* q, cf_t* in_buffer, uint32_t max_prb);
+SRSRAN_API int
+srsran_enb_ul_init(srsran_enb_ul_t* q, cf_t* in_buffer[SRSRAN_MAX_PORTS], uint32_t max_prb, uint32_t nof_rx_antennas);
 
 SRSRAN_API void srsran_enb_ul_free(srsran_enb_ul_t* q);
 

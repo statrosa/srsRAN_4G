@@ -64,6 +64,10 @@ add_executable(pucch_ca_test pucch_ca_test.c)
 target_link_libraries(pucch_ca_test srsran_phy srsran_common srsran_phy ${SEC_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 add_lte_test(pucch_ca_test pucch_ca_test)
 
+add_executable(enb_ul_test enb_ul_test.c)
+target_link_libraries(enb_ul_test srsran_phy srsran_common srsran_phy ${SEC_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+add_lte_test(enb_ul_test enb_ul_test)
+
 add_executable(phy_dl_nr_test phy_dl_nr_test.c)
 target_link_libraries(phy_dl_nr_test srsran_phy srsran_common srsran_phy ${SEC_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
 

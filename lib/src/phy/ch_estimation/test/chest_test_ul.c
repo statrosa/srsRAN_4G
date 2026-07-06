@@ -198,7 +198,9 @@ int main(int argc, char** argv)
                   srsran_pusch_cfg_t    cfg;
 
                   ZERO_OBJECT(cfg);
-                  res.ce                   = ce;
+                  ZERO_OBJECT(res);
+                  res.ce[0]                = ce;
+                  res.nof_rx_antennas      = 1;
                   cfg.grant.L_prb          = n;
                   cfg.grant.n_prb_tilde[0] = 0;
                   cfg.grant.n_prb_tilde[1] = 0;
@@ -209,7 +211,8 @@ int main(int argc, char** argv)
                   ul_sf.tti = sf_idx;
 
                   // Estimate channel
-                  srsran_chest_ul_estimate_pusch(&est, &ul_sf, &cfg, input, &res);
+                  cf_t* input_m[SRSRAN_MAX_PORTS] = {input};
+                  srsran_chest_ul_estimate_pusch(&est, &ul_sf, &cfg, input_m, &res);
 
                   // Compute MSE
                   float mse = 0;

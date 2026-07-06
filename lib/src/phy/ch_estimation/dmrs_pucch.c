@@ -329,7 +329,7 @@ int srsran_dmrs_pucch_format1_estimate(const srsran_pucch_nr_t*            q,
 
   // Interpolates between DMRS symbols
   for (uint32_t m = 0; m < n_pucch_sum; m++) {
-    cf_t* ce_ptr = &res->ce[m * SRSRAN_NRE];
+    cf_t* ce_ptr = &res->ce[0][m * SRSRAN_NRE];
 
     if (m != n_pucch_sum - 1) {
       // If it is not the last symbol with DMRS, average between
@@ -505,7 +505,7 @@ int srsran_dmrs_pucch_format2_estimate(const srsran_pucch_nr_t*            q,
   // Zero order hold
   for (uint32_t l = l_start, j = 0; l < l_end; l++, j++) {
     for (uint32_t k = k_start - 1, i = 0; k < k_end; k++, i++) {
-      res->ce[l * q->carrier.nof_prb * SRSRAN_NRE + k] = ce[j][i / 3];
+      res->ce[0][l * q->carrier.nof_prb * SRSRAN_NRE + k] = ce[j][i / 3];
     }
   }
 
