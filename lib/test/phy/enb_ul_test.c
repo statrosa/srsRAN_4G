@@ -98,14 +98,16 @@ static int run_pusch_test(uint32_t  nof_rx_antennas,
   ue_ul_cfg.grant_available             = true;
 
   srsran_dci_ul_t dci = {};
+  dci.freq_hop_fl     = SRSRAN_RA_PUSCH_HOP_DISABLED;
   dci.type2_alloc.riv = srsran_ra_type2_to_riv(20, 0, cell.nof_prb);
   dci.tb.mcs_idx      = mcs_idx;
   dci.tb.rv           = 0;
   TESTASSERT(!srsran_ue_ul_dci_to_pusch_grant(&ue_ul, &ul_sf, &ue_ul_cfg, &dci, &ue_ul_cfg.ul_cfg.pusch.grant));
 
   uint32_t tbs_bytes = (uint32_t)ue_ul_cfg.ul_cfg.pusch.grant.tb.tbs / 8;
-  uint8_t* data      = srsran_vec_u8_malloc(tbs_bytes);
-  uint8_t* data_rx   = srsran_vec_u8_malloc(tbs_bytes);
+  // Allocate some slack: the decoder writes the byte-aligned code block including the transport block CRC
+  uint8_t* data    = srsran_vec_u8_malloc(tbs_bytes + 16);
+  uint8_t* data_rx = srsran_vec_u8_malloc(tbs_bytes + 16);
   TESTASSERT(data && data_rx);
 
   *nof_crc_ok      = 0;
