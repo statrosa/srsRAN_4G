@@ -1,0 +1,21 @@
+{
+  "scenario": "s1_benign_2rx",
+  "enb_conf": "enb_2rx.conf",
+  "splitter_args": [
+    "--mode",
+    "2rx",
+    "--noise0",
+    "66.9",
+    "--noise1",
+    "66.9"
+  ],
+  "ra_transmissions": 4,
+  "ra_completions": 4,
+  "prach_detections": 4,
+  "prach_peak2avg_mean": 799.425,
+  "pusch_total": 4,
+  "pusch_crc_ok": 4,
+  "pusch_snr_mean": 6.975,
+  "pusch_snr_min": 6.8,
+  "pusch_ta_absmax": 0.6
+}
