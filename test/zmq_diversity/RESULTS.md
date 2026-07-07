@@ -32,6 +32,23 @@ in-band SNR, roughly full-band + 12 dB at this allocation).
 *1rx ETU300 is a manual control run (`results/etu_1rx_*`), not part of the
 orchestrated matrix.
 
+## Co-channel interference — MRC vs MMSE-IRC (scenario s9)
+
+A rank-1 co-channel interferer (one waveform with a fixed per-antenna spatial
+signature) 15 dB above the noise, benign wanted-SNR (SNR₀+8). Same channel,
+`expert.equalizer_mode` toggled. See `docs/UL_RX_IRC_OPTIMIZATIONS.md`.
+
+| Arm | Equalizer | Interferer | PRACH det | Msg3 CRC OK | SNR |
+|---|---|---|---|---|---|
+| s9 MRC | MRC | 15 dB rank-1 | 90/90 | **0/360 (0%)** | — |
+| s9 IRC | MMSE-IRC | 15 dB rank-1 | 90/90 | **87/87 (100%)** | 3.0 dB |
+| s9 parity | MMSE-IRC | none (clean) | 120/120 | 120/120 (100%) | 7.2 dB |
+
+IRC nulls an interferer that MRC cannot escape (0 → 100% Msg3), and on a clean
+channel matches the MRC benign result (7.2 vs 7.1 dB) — no bias. PRACH stays
+MRC and is unaffected; the interference cost lands entirely on the PUSCH
+payload, which is where IRC recovers it.
+
 ## Acceptance checks
 
 1. **+3 dB combined SNR** (s1): +2.8 dB measured. ✔
