@@ -1,0 +1,1 @@
+channel_splitter: tcp://localhost:2101 -> [2201, 2202] fading=none doppler=5.0
