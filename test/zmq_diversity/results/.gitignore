@@ -1,0 +1,2 @@
+# Raw run logs are large and transient; only scenario JSONs are kept
+*.log

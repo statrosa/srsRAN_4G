@@ -1,0 +1,59 @@
+Active RF plugins: libsrsran_rf_zmq.so
+Inactive RF plugins: 
+---  Software Radio Systems LTE eNodeB  ---
+
+Reading configuration file enb_2rx.conf...
+
+Built in Release mode using commit dce3230 on branch claude/srsenb-rx-diversity-ohkx2i.
+
+Could not create socket
+: Socket type not supported
+Opening 2 channels in RF device=zmq with args=id=enb,base_srate=5.76e6,tx_port0=tcp://*:2000,rx_port0=tcp://localhost:2201,rx_port1=tcp://localhost:2202
+Supported RF device list: zmq file
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+CHx base_srate=5.76e6
+CHx id=enb
+Current sample rate is 1.92 MHz with a base rate of 5.76 MHz (x3 decimation)
+CH0 rx_port=tcp://localhost:2201
+CH0 tx_port=tcp://*:2000
+CH1 rx_port=tcp://localhost:2202
+[zmq] enb Tx port not specified. Disabling transmitter 1.
+
+==== eNodeB started ===
+Type <t> to view trace
+Current sample rate is 5.76 MHz with a base rate of 5.76 MHz (x1 decimation)
+Current sample rate is 5.76 MHz with a base rate of 5.76 MHz (x1 decimation)
+Setting frequency: DL=2680.0 Mhz, UL=2560.0 MHz for cc_idx=0 nof_prb=25
+Closing stdin thread.
+RACH:  tti=981, cc=0, pci=1, preamble=28, offset=0, temp_crnti=0x46
+Disconnecting rnti=0x46.
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+RACH:  tti=5621, cc=0, pci=1, preamble=44, offset=0, temp_crnti=0x47
+Disconnecting rnti=0x47.
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+RACH:  tti=181, cc=0, pci=1, preamble=49, offset=0, temp_crnti=0x48
+Disconnecting rnti=0x48.
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds
+RACH:  tti=4821, cc=0, pci=1, preamble=1, offset=0, temp_crnti=0x49
+Disconnecting rnti=0x49.
+Could not create socket
+: Socket type not supported
+Failed to initiate S1 connection. Attempting reconnection in 10 seconds

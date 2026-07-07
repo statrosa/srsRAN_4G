@@ -1,0 +1,45 @@
+Active RF plugins: libsrsran_rf_zmq.so
+Inactive RF plugins: 
+Reading configuration file ue.conf...
+
+Built in Release mode using commit dce3230 on branch claude/srsenb-rx-diversity-ohkx2i.
+
+Opening 1 channels in RF device=zmq with args=id=ue,base_srate=5.76e6,tx_port0=tcp://*:2101,rx_port0=tcp://localhost:2000
+Supported RF device list: zmq file
+CHx base_srate=5.76e6
+CHx id=ue
+Current sample rate is 1.92 MHz with a base rate of 5.76 MHz (x3 decimation)
+CH0 rx_port=tcp://localhost:2000
+CH0 tx_port=tcp://*:2101
+Waiting PHY to initialize ... done!
+Attaching UE...
+Closing stdin thread.
+Current sample rate is 5.76 MHz with a base rate of 5.76 MHz (x1 decimation)
+Current sample rate is 5.76 MHz with a base rate of 5.76 MHz (x1 decimation)
+.
+Found Cell:  Mode=FDD, PCI=1, PRB=25, Ports=1, CP=Normal, CFO=0.0 KHz
+Found PLMN:  Id=90170, TAC=7
+Random Access Transmission: seq=28, tti=981, ra-rnti=0x2
+Received ConnectionReject. Wait time: 10
+Random Access Complete.     c-rnti=0x46, ta=0
+Attach failed (attempt 1/5)
+.
+Found Cell:  Mode=FDD, PCI=1, PRB=25, Ports=1, CP=Normal, CFO=-0.0 KHz
+Found PLMN:  Id=90170, TAC=7
+Random Access Transmission: seq=44, tti=5621, ra-rnti=0x2
+Received ConnectionReject. Wait time: 10
+Random Access Complete.     c-rnti=0x47, ta=0
+Attach failed (attempt 2/5)
+.
+Found Cell:  Mode=FDD, PCI=1, PRB=25, Ports=1, CP=Normal, CFO=0.0 KHz
+Found PLMN:  Id=90170, TAC=7
+Random Access Transmission: seq=49, tti=181, ra-rnti=0x2
+Received ConnectionReject. Wait time: 10
+Random Access Complete.     c-rnti=0x48, ta=0
+Attach failed (attempt 3/5)
+.
+Found Cell:  Mode=FDD, PCI=1, PRB=25, Ports=1, CP=Normal, CFO=-0.0 KHz
+Found PLMN:  Id=90170, TAC=7
+Random Access Transmission: seq=1, tti=4821, ra-rnti=0x2
+Received ConnectionReject. Wait time: 10
+Random Access Complete.     c-rnti=0x49, ta=0
