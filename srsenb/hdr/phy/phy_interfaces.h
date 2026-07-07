@@ -66,7 +66,7 @@ struct phy_args_t {
   bool                    pusch_8bit_decoder  = false;
   float                   tx_amplitude        = 1.0f;
   uint32_t                nof_phy_threads     = 1;
-  uint32_t                nof_rx_ant          = 1;
+  uint32_t                nof_rx_ant          = 0; // UL RX antennas; 0 = same as the cell's TX ports
   std::string             equalizer_mode      = "mmse";
   float                   estimator_fil_w     = 1.0f;
   bool                    pusch_meas_epre     = true;

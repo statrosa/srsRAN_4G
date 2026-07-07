@@ -107,7 +107,8 @@ public:
 
     return ret;
   }
-  uint32_t get_nof_rx_ant() { return SRSRAN_MAX(1, params.nof_rx_ant); }
+  // UL RX antennas; when not configured it follows the number of TX ports (the pre-diversity behavior)
+  uint32_t get_nof_rx_ant() { return (params.nof_rx_ant > 0) ? params.nof_rx_ant : SRSRAN_MAX(1, get_nof_ports(0)); }
   // Stride between logical carriers in the RF buffer; must match the radio's nof_antennas
   uint32_t get_rf_ant_stride() { return SRSRAN_MAX(get_nof_ports(0), get_nof_rx_ant()); }
   uint32_t get_nof_rf_channels()
