@@ -1,0 +1,17 @@
+{
+  "scenario": "s8_etu300_2rx",
+  "enb_conf": "enb_2rx_etu.conf",
+  "splitter_args": [
+    "--mode",
+    "2rx"
+  ],
+  "ra_transmissions": 84,
+  "ra_completions": 4,
+  "prach_detections": 4,
+  "prach_peak2avg_mean": 644.4000000000001,
+  "pusch_total": 4,
+  "pusch_crc_ok": 4,
+  "pusch_snr_mean": 32.725,
+  "pusch_snr_min": 28.0,
+  "pusch_ta_absmax": 0.6
+}
