@@ -1,0 +1,23 @@
+{
+  "scenario": "s9_interf_mrc",
+  "enb_conf": "enb_2rx.conf",
+  "splitter_args": [
+    "--mode",
+    "2rx",
+    "--noise0",
+    "66.9",
+    "--noise1",
+    "66.9",
+    "--interf-inr",
+    "15"
+  ],
+  "ra_transmissions": 90,
+  "ra_completions": 0,
+  "prach_detections": 90,
+  "prach_peak2avg_mean": 323.6766666666667,
+  "pusch_total": 360,
+  "pusch_crc_ok": 0,
+  "pusch_snr_mean": null,
+  "pusch_snr_min": null,
+  "pusch_ta_absmax": null
+}

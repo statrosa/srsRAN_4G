@@ -372,3 +372,16 @@ disconnected vs both connected.
   alarms.
 - Kernel SCTP is required for srsepc/S1AP (full attach) — not available in
   some containers; everything up to and including Msg3 works regardless.
+
+---
+
+## 7. Optional MMSE-IRC equalizer
+
+An optional interference-rejection-combining equalizer builds on this
+per-antenna infrastructure. It is documented separately in
+[`UL_RX_IRC_OPTIMIZATIONS.md`](UL_RX_IRC_OPTIMIZATIONS.md): flag-gated
+(`expert.equalizer_mode = irc`, default MRC), it whitens with the estimated
+interference-plus-noise covariance to spatially null a co-channel interferer.
+End-to-end result: under a 15 dB rank-1 interferer that leaves MRC decoding
+0/360 Msg3 transmissions, IRC decodes 100%, with no penalty on a clean
+channel.

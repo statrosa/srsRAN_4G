@@ -1,0 +1,21 @@
+{
+  "scenario": "s9_parity_irc",
+  "enb_conf": "enb_2rx_irc.conf",
+  "splitter_args": [
+    "--mode",
+    "2rx",
+    "--noise0",
+    "66.9",
+    "--noise1",
+    "66.9"
+  ],
+  "ra_transmissions": 120,
+  "ra_completions": 0,
+  "prach_detections": 120,
+  "prach_peak2avg_mean": 799.7691666666667,
+  "pusch_total": 120,
+  "pusch_crc_ok": 120,
+  "pusch_snr_mean": 7.198333333333333,
+  "pusch_snr_min": 5.6,
+  "pusch_ta_absmax": 1.2
+}
