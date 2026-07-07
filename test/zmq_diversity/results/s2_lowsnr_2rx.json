@@ -1,0 +1,21 @@
+{
+  "scenario": "s2_lowsnr_2rx",
+  "enb_conf": "enb_2rx.conf",
+  "splitter_args": [
+    "--mode",
+    "2rx",
+    "--noise0",
+    "74.9",
+    "--noise1",
+    "74.9"
+  ],
+  "ra_transmissions": 12,
+  "ra_completions": 12,
+  "prach_detections": 12,
+  "prach_peak2avg_mean": 642.1416666666667,
+  "pusch_total": 15,
+  "pusch_crc_ok": 11,
+  "pusch_snr_mean": 3.6818181818181817,
+  "pusch_snr_min": 2.8,
+  "pusch_ta_absmax": 11.4
+}
