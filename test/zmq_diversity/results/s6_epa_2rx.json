@@ -1,0 +1,25 @@
+{
+  "scenario": "s6_epa_2rx",
+  "enb_conf": "enb_2rx.conf",
+  "splitter_args": [
+    "--mode",
+    "2rx",
+    "--fading",
+    "epa",
+    "--doppler",
+    "5",
+    "--noise0",
+    "68.9",
+    "--noise1",
+    "68.9"
+  ],
+  "ra_transmissions": 9,
+  "ra_completions": 9,
+  "prach_detections": 6,
+  "prach_peak2avg_mean": 767.4,
+  "pusch_total": 6,
+  "pusch_crc_ok": 6,
+  "pusch_snr_mean": 7.116666666666667,
+  "pusch_snr_min": 5.2,
+  "pusch_ta_absmax": 7.0
+}
