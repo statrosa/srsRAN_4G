@@ -77,6 +77,10 @@ SRSRAN_API int srsran_enb_ul_set_cell(srsran_enb_ul_t*                   q,
 
 SRSRAN_API void srsran_enb_ul_fft(srsran_enb_ul_t* q);
 
+/* Enable MMSE-IRC equalization for PUSCH. Only takes effect with exactly two RX antennas;
+ * decoding falls back to MRC whenever a usable interference covariance is not available. */
+SRSRAN_API void srsran_enb_ul_set_irc(srsran_enb_ul_t* q, bool enable);
+
 SRSRAN_API int srsran_enb_ul_get_pucch(srsran_enb_ul_t*    q,
                                        srsran_ul_sf_cfg_t* ul_sf,
                                        srsran_pucch_cfg_t* cfg,

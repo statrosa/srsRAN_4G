@@ -153,6 +153,13 @@ int srsran_enb_ul_set_cell(srsran_enb_ul_t*                   q,
   return ret;
 }
 
+void srsran_enb_ul_set_irc(srsran_enb_ul_t* q, bool enable)
+{
+  bool en                = enable && q->nof_rx_antennas == 2;
+  q->chest.est_noise_cov = en;
+  srsran_pusch_set_irc(&q->pusch, en);
+}
+
 void srsran_enb_ul_fft(srsran_enb_ul_t* q)
 {
   for (uint32_t a = 0; a < q->nof_rx_antennas; a++) {

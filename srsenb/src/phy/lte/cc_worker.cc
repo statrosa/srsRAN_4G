@@ -135,6 +135,15 @@ void cc_worker::init(phy_common* phy_, uint32_t cc_idx_)
     return;
   }
 
+  if (phy->params.equalizer_mode == "irc") {
+    if (phy->get_nof_rx_ant() == 2) {
+      srsran_enb_ul_set_irc(&enb_ul, true);
+      Info("UL equalizer: MMSE-IRC enabled (2 RX antennas, MRC fallback on unusable covariance)");
+    } else {
+      Info("UL equalizer: IRC requested but nof_rx_ant=%d != 2, using MRC", phy->get_nof_rx_ant());
+    }
+  }
+
   /* Setup SI-RNTI in PHY */
   add_rnti(SRSRAN_SIRNTI);
 

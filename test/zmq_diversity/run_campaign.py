@@ -233,6 +233,17 @@ def main():
           "--noise0", str(noise_for(s0 + 6)), "--noise1", str(noise_for(s0 + 6))]),
         ("s8_etu300_2rx", "enb_2rx_etu.conf",
          ["--mode", "2rx"]),
+        # Co-channel interference: rank-1 interferer 15 dB above the noise, benign SNR.
+        # MRC treats it as noise and chokes; IRC (enb_2rx_irc.conf) nulls it spatially.
+        ("s9_interf_mrc", "enb_2rx.conf",
+         ["--mode", "2rx", "--noise0", str(noise_for(s0 + 8)), "--noise1", str(noise_for(s0 + 8)),
+          "--interf-inr", "15"]),
+        ("s9_interf_irc", "enb_2rx_irc.conf",
+         ["--mode", "2rx", "--noise0", str(noise_for(s0 + 8)), "--noise1", str(noise_for(s0 + 8)),
+          "--interf-inr", "15"]),
+        # Bias check: IRC on a clean channel must match the MRC benign scenario
+        ("s9_parity_irc", "enb_2rx_irc.conf",
+         ["--mode", "2rx", "--noise0", str(noise_for(s0 + 8)), "--noise1", str(noise_for(s0 + 8))]),
     ]
 
     results = []

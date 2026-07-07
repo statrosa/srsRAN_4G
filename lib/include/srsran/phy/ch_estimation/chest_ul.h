@@ -49,6 +49,8 @@
 typedef struct SRSRAN_API {
   cf_t*    ce[SRSRAN_MAX_PORTS]; ///< Per RX-antenna channel estimates
   uint32_t nof_rx_antennas;      ///< Number of valid entries in ce
+  cf_t     noise_cov[SRSRAN_MAX_PORTS][SRSRAN_MAX_PORTS]; ///< Interference+noise covariance (IRC)
+  bool     noise_cov_valid;                               ///< noise_cov holds a usable estimate
   uint32_t nof_re;
   float    noise_estimate;
   float    noise_estimate_dbFs;
@@ -84,6 +86,9 @@ typedef struct {
 #endif
   uint32_t smooth_filter_len;
   float    smooth_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
+
+  // Estimate the interference+noise covariance across antennas (needed for IRC)
+  bool est_noise_cov;
 
   srsran_interp_linsrsran_vec_t srsran_interp_linvec;
 

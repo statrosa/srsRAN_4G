@@ -28,6 +28,8 @@
  *  - PUCCH is detected and decoded correctly with 1 and 2 RX antennas
  *  - PUSCH decodes at high SNR with 1 and 2 RX antennas, and the reported SNR gains ~3 dB with the second antenna
  *  - at an SNR where a single antenna mostly fails, two antennas decode reliably
+ *  - MMSE-IRC: with a spatially-colored co-channel interferer IRC decodes where MRC fails; without interference
+ *    IRC performs like MRC (no regression); with 1 antenna the IRC flag safely degrades to MRC
  */
 
 #include <srsran/common/test_common.h>
@@ -55,6 +57,8 @@ static int run_pusch_test(uint32_t  nof_rx_antennas,
                           uint32_t  mcs_idx,
                           float     snr_db,
                           uint32_t  nof_sf,
+                          bool      irc_enable,
+                          float     inr_db, // co-channel interferer power over noise; -INFINITY disables
                           uint32_t* nof_crc_ok,
                           float*    avg_snr_db)
 {
@@ -86,6 +90,7 @@ static int run_pusch_test(uint32_t  nof_rx_antennas,
 
   TESTASSERT(!srsran_enb_ul_init(&enb_ul, rx_buffer, cell.nof_prb, nof_rx_antennas));
   TESTASSERT(!srsran_enb_ul_set_cell(&enb_ul, cell, &dmrs_pusch_cfg, NULL));
+  srsran_enb_ul_set_irc(&enb_ul, irc_enable);
 
   TESTASSERT(!srsran_channel_awgn_init(&awgn, 0x5678));
 
@@ -134,6 +139,20 @@ static int run_pusch_test(uint32_t  nof_rx_antennas,
     for (uint32_t a = 0; a < nof_rx_antennas; a++) {
       srsran_vec_sc_prod_ccc(tx_buffer, cexpf(I * ant_phase[a]), rx_buffer[a], sf_len);
       srsran_channel_awgn_run_c(&awgn, rx_buffer[a], rx_buffer[a], sf_len);
+    }
+
+    // Add a rank-1 co-channel interferer: one white waveform with a fixed spatial signature
+    // (different from the signal's), scaled to inr_db above the noise floor per antenna
+    if (isfinite(inr_db)) {
+      const cf_t interf_sig[SRSRAN_MAX_PORTS] = {1.0f, cexpf(I * 2.0f), cexpf(-I * 1.1f), cexpf(I * 0.4f)};
+      float      interf_amp                   = powf(10.0f, (n0_dBfs + inr_db) / 20.0f);
+      for (uint32_t i = 0; i < sf_len; i++) {
+        cf_t v = srsran_random_gauss_dist(random_gen, 1.0f) + I * srsran_random_gauss_dist(random_gen, 1.0f);
+        v      = v * (interf_amp * (float)M_SQRT1_2);
+        for (uint32_t a = 0; a < nof_rx_antennas; a++) {
+          rx_buffer[a][i] += interf_sig[a] * v;
+        }
+      }
     }
 
     // eNB receive chain
@@ -273,8 +292,8 @@ int main(int argc, char** argv)
   TESTASSERT(!run_pucch_test(2, 10.0f));
 
   // PUSCH at high SNR: both antenna configurations decode every subframe
-  TESTASSERT(!run_pusch_test(1, 10, 30.0f, 4, &crc_ok_1, &snr_1));
-  TESTASSERT(!run_pusch_test(2, 10, 30.0f, 4, &crc_ok_2, &snr_2));
+  TESTASSERT(!run_pusch_test(1, 10, 30.0f, 4, false, -INFINITY, &crc_ok_1, &snr_1));
+  TESTASSERT(!run_pusch_test(2, 10, 30.0f, 4, false, -INFINITY, &crc_ok_2, &snr_2));
   printf("high SNR: 1rx crc=%d/4 snr=%.1f dB; 2rx crc=%d/4 snr=%.1f dB\n", crc_ok_1, snr_1, crc_ok_2, snr_2);
   TESTASSERT(crc_ok_1 == 4);
   TESTASSERT(crc_ok_2 == 4);
@@ -284,11 +303,35 @@ int main(int argc, char** argv)
   TESTASSERT(snr_2 - snr_1 < 4.5f);
 
   // PUSCH at an SNR where a single antenna mostly fails: two antennas shall decode reliably
-  TESTASSERT(!run_pusch_test(1, 16, 6.0f, 10, &crc_ok_1, &snr_1));
-  TESTASSERT(!run_pusch_test(2, 16, 6.0f, 10, &crc_ok_2, &snr_2));
+  TESTASSERT(!run_pusch_test(1, 16, 6.0f, 10, false, -INFINITY, &crc_ok_1, &snr_1));
+  TESTASSERT(!run_pusch_test(2, 16, 6.0f, 10, false, -INFINITY, &crc_ok_2, &snr_2));
   printf("low SNR: 1rx crc=%d/10 snr=%.1f dB; 2rx crc=%d/10 snr=%.1f dB\n", crc_ok_1, snr_1, crc_ok_2, snr_2);
   TESTASSERT(crc_ok_2 >= 8);
   TESTASSERT(crc_ok_2 >= crc_ok_1 + 5);
+
+  // --- MMSE-IRC ---
+
+  // No regression without interference: IRC decodes like MRC at the same marginal SNR
+  uint32_t crc_ok_mrc = 0, crc_ok_irc = 0;
+  float    snr_mrc = 0.0f, snr_irc = 0.0f;
+  TESTASSERT(!run_pusch_test(2, 16, 7.0f, 10, false, -INFINITY, &crc_ok_mrc, &snr_mrc));
+  TESTASSERT(!run_pusch_test(2, 16, 7.0f, 10, true, -INFINITY, &crc_ok_irc, &snr_irc));
+  printf("IRC parity (no interference): mrc crc=%d/10, irc crc=%d/10\n", crc_ok_mrc, crc_ok_irc);
+  TESTASSERT(!isnan(snr_irc) && !isinf(snr_irc));
+  TESTASSERT((int)crc_ok_irc >= (int)crc_ok_mrc - 1);
+
+  // Directional interferer: MRC must mostly fail, IRC must decode reliably
+  TESTASSERT(!run_pusch_test(2, 16, 20.0f, 10, false, 15.0f, &crc_ok_mrc, &snr_mrc));
+  TESTASSERT(!run_pusch_test(2, 16, 20.0f, 10, true, 15.0f, &crc_ok_irc, &snr_irc));
+  printf("IRC gain (INR 15 dB): mrc crc=%d/10, irc crc=%d/10\n", crc_ok_mrc, crc_ok_irc);
+  TESTASSERT(crc_ok_irc >= 8);
+  TESTASSERT(crc_ok_irc >= crc_ok_mrc + 5);
+
+  // Flag with a single antenna safely degrades to MRC
+  TESTASSERT(!run_pusch_test(1, 10, 30.0f, 4, true, -INFINITY, &crc_ok_irc, &snr_irc));
+  printf("IRC 1rx fallback: crc=%d/4 snr=%.1f dB\n", crc_ok_irc, snr_irc);
+  TESTASSERT(crc_ok_irc == 4);
+  TESTASSERT(!isnan(snr_irc) && !isinf(snr_irc));
 
   printf("Ok\n");
 

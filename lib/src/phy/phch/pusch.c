@@ -190,6 +190,13 @@ int srsran_pusch_init_enb(srsran_pusch_t* q, uint32_t max_prb, uint32_t nof_rx_a
   return pusch_init(q, max_prb, false, nof_rx_antennas);
 }
 
+void srsran_pusch_set_irc(srsran_pusch_t* q, bool enable)
+{
+  if (q) {
+    q->irc_enable = enable && !q->is_ue;
+  }
+}
+
 void srsran_pusch_free(srsran_pusch_t* q)
 {
   int i;
@@ -430,9 +437,22 @@ int srsran_pusch_decode(srsran_pusch_t*        q,
       out->epre_dbfs = NAN;
     }
 
-    // Equalization with MRC over RX antennas
-    srsran_predecoding_single_multi(
-        q->d, q->ce, q->z, NULL, nof_rx_antennas, cfg->grant.nof_re, 1.0f, channel->noise_estimate);
+    // Equalization: MMSE-IRC when enabled and a valid interference covariance is available,
+    // otherwise MRC over RX antennas (also the runtime fallback inside the IRC kernel)
+    if (q->irc_enable && nof_rx_antennas == 2 && channel->noise_cov_valid) {
+      srsran_predecoding_single_multi_cov(
+          q->d, q->ce, q->z, nof_rx_antennas, cfg->grant.nof_re, 1.0f, channel->noise_cov);
+    } else {
+      if (q->irc_enable && nof_rx_antennas == 2) {
+        // Not silent: IRC was requested but the estimator could not produce a usable covariance
+        static uint32_t irc_fallback_count = 0; // diagnostics only, races are harmless
+        if (irc_fallback_count++ % 100 == 0) {
+          INFO("PUSCH IRC: falling back to MRC, no valid noise covariance (count=%u)", irc_fallback_count + 1);
+        }
+      }
+      srsran_predecoding_single_multi(
+          q->d, q->ce, q->z, NULL, nof_rx_antennas, cfg->grant.nof_re, 1.0f, channel->noise_estimate);
+    }
 
     // DFT predecoding
     srsran_dft_precoding(&q->dft_precoding, q->z, q->d[0], cfg->grant.L_prb, cfg->grant.nof_symb);

@@ -352,6 +352,62 @@ static void chest_ul_combine_meas(const chest_ul_ant_meas_t* meas, uint32_t nof_
 }
 
 /**
+ * Estimates the interference-plus-noise covariance across RX antennas from the per-antenna DMRS residuals
+ * (Least-Squares estimate minus averaged estimate). The diagonal reuses the calibrated per-antenna noise
+ * estimates so it stays consistent with the scalar noise_estimate; the cross terms get the same calibration
+ * factor. The result is clamped and diagonally loaded so that R stays Hermitian positive definite.
+ */
+static void chest_ul_estimate_noise_cov(srsran_chest_ul_t*         q,
+                                        const chest_ul_ant_meas_t* meas,
+                                        uint32_t                   nof_antennas,
+                                        uint32_t                   nrefs_sf,
+                                        srsran_chest_ul_res_t*     res)
+{
+  // Same calibration factor as estimate_noise_pilots()
+  float cal = 1.0f;
+  if (q->smooth_filter_len == 3) {
+    float w = q->smooth_filter[0];
+    float a = 7.419f * w * w + 0.1117f * w - 0.005387f;
+    cal     = 1.0f / (a * 0.8f);
+  }
+
+  bool ok = true;
+  for (uint32_t i = 0; i < nof_antennas; i++) {
+    res->noise_cov[i][i] = meas[i].noise_estimate;
+    ok = ok && isfinite(meas[i].noise_estimate) && meas[i].noise_estimate >= 0.0f;
+  }
+  for (uint32_t i = 0; i < nof_antennas && ok; i++) {
+    for (uint32_t j = i + 1; j < nof_antennas && ok; j++) {
+      cf_t rij = srsran_vec_dot_prod_conj_ccc(q->pilot_estimates_tmp[i], q->pilot_estimates_tmp[j], nrefs_sf);
+      rij      = rij * (cal / (float)nrefs_sf);
+      ok       = isfinite(__real__ rij) && isfinite(__imag__ rij);
+
+      // A sample cross term can exceed the geometric mean of the diagonals; clamp to keep R positive definite
+      float max_mag = 0.95f * sqrtf(__real__ res->noise_cov[i][i] * __real__ res->noise_cov[j][j]);
+      float mag     = cabsf(rij);
+      if (mag > max_mag && mag > 0.0f) {
+        rij = rij * (max_mag / mag);
+      }
+      res->noise_cov[i][j] = rij;
+      res->noise_cov[j][i] = conjf(rij);
+    }
+  }
+
+  if (ok) {
+    // Diagonal loading guarantees invertibility
+    float tr = 0.0f;
+    for (uint32_t i = 0; i < nof_antennas; i++) {
+      tr += __real__ res->noise_cov[i][i];
+    }
+    float load = 0.05f * tr / nof_antennas + 1e-10f;
+    for (uint32_t i = 0; i < nof_antennas; i++) {
+      res->noise_cov[i][i] += load;
+    }
+    res->noise_cov_valid = true;
+  }
+}
+
+/**
  * Generic PUSCH and DMRS channel estimation for a single RX antenna. It assumes q->pilot_estimates has been populated
  * with the Least Square Estimates
  *
@@ -481,6 +537,8 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
   uint32_t            nof_antennas             = SRSRAN_MAX(1, res->nof_rx_antennas);
   chest_ul_ant_meas_t meas[SRSRAN_MAX_PORTS]   = {};
 
+  res->noise_cov_valid = false;
+
   for (uint32_t a = 0; a < nof_antennas; a++) {
     if (input[a] == NULL) {
       return SRSRAN_ERROR_INVALID_INPUTS;
@@ -506,9 +564,25 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                       cfg->grant.n_prb,
                       res->ce[a],
                       &meas[a]);
+
+    // Persist this antenna's DMRS residual (LS minus averaged estimate at the pilot REs) for the
+    // interference covariance cross terms
+    if (q->est_noise_cov && a < 4) {
+      for (int i = 0; i < SRSRAN_NOF_SLOTS_PER_SF; i++) {
+        srsran_vec_sub_ccc(&q->pilot_estimates[i * nrefs_sym],
+                           &res->ce[a][SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE +
+                                       cfg->grant.n_prb[i] * SRSRAN_NRE],
+                           &q->pilot_estimates_tmp[a][i * nrefs_sym],
+                           nrefs_sym);
+      }
+    }
   }
 
   chest_ul_combine_meas(meas, nof_antennas, res);
+
+  if (q->est_noise_cov && nof_antennas >= 2 && nof_antennas <= 4) {
+    chest_ul_estimate_noise_cov(q, meas, nof_antennas, (uint32_t)nrefs_sf, res);
+  }
 
   return 0;
 }

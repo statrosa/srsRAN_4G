@@ -53,6 +53,7 @@ typedef struct SRSRAN_API {
   uint16_t ue_rnti;
   uint32_t max_re;
   uint32_t nof_rx_antennas;
+  bool     irc_enable; ///< Equalize with the interference covariance (MMSE-IRC) when available
 
   bool llr_is_8bit;
 
@@ -93,6 +94,10 @@ typedef struct SRSRAN_API {
 SRSRAN_API int srsran_pusch_init_ue(srsran_pusch_t* q, uint32_t max_prb);
 
 SRSRAN_API int srsran_pusch_init_enb(srsran_pusch_t* q, uint32_t max_prb, uint32_t nof_rx_antennas);
+
+/* Enable MMSE-IRC equalization (eNB only). Takes effect when the channel result carries a valid
+ * interference covariance and two RX antennas are configured; otherwise decoding falls back to MRC. */
+SRSRAN_API void srsran_pusch_set_irc(srsran_pusch_t* q, bool enable);
 
 SRSRAN_API void srsran_pusch_free(srsran_pusch_t* q);
 

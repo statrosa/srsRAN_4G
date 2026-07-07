@@ -392,6 +392,69 @@ int srsran_predecoding_single(cf_t*  y_,
 }
 
 /* ZF/MMSE SISO equalizer x=y(h'h+no)^(-1)h' (ZF if n0=0.0)*/
+int srsran_predecoding_single_multi_cov(cf_t* y[SRSRAN_MAX_PORTS],
+                                        cf_t* h[SRSRAN_MAX_PORTS],
+                                        cf_t* x,
+                                        int   nof_rxant,
+                                        int   nof_symbols,
+                                        float scaling,
+                                        cf_t  cov[SRSRAN_MAX_PORTS][SRSRAN_MAX_PORTS])
+{
+  if (y == NULL || h == NULL || x == NULL || nof_rxant < 1 || nof_symbols < 0) {
+    return SRSRAN_ERROR;
+  }
+
+  if (nof_rxant == 2 && cov != NULL) {
+    cf_t r00 = cov[0][0];
+    cf_t r01 = cov[0][1];
+    cf_t r10 = cov[1][0];
+    cf_t r11 = cov[1][1];
+
+    bool finite = isfinite(__real__ r00) && isfinite(__imag__ r00) && isfinite(__real__ r01) &&
+                  isfinite(__imag__ r01) && isfinite(__real__ r10) && isfinite(__imag__ r10) &&
+                  isfinite(__real__ r11) && isfinite(__imag__ r11);
+
+    float trace = __real__ r00 + __real__ r11;
+    cf_t  det   = srsran_mat_2x2_det_gen(r00, r01, r10, r11);
+
+    // A Hermitian positive-definite R has a real positive determinant; also require the condition
+    // number to be bounded so the inverse cannot amplify estimation noise catastrophically
+    if (finite && trace > 0.0f && __real__ det > 1e-4f * (trace * trace / 4.0f)) {
+      cf_t i00, i01, i10, i11;
+      srsran_mat_2x2_inv_gen(r00, r01, r10, r11, &i00, &i01, &i10, &i11);
+
+      for (int i = 0; i < nof_symbols; i++) {
+        cf_t h0 = h[0][i];
+        cf_t h1 = h[1][i];
+
+        // w = R^-1 h; since R^-1 is Hermitian, h^H R^-1 = w^H
+        cf_t w0 = i00 * h0 + i01 * h1;
+        cf_t w1 = i10 * h0 + i11 * h1;
+
+        cf_t  num = conjf(w0) * y[0][i] + conjf(w1) * y[1][i]; // h^H R^-1 y
+        float den = __real__(conjf(w0) * h0 + conjf(w1) * h1); // h^H R^-1 h (real, >= 0)
+
+        // MMSE normalization in the whitened domain (unit noise variance)
+        x[i] = num / ((den + 1.0f) * scaling);
+      }
+      return nof_symbols;
+    }
+  }
+
+  // Fallback: MRC with the average diagonal noise. Never worse than the non-IRC path.
+  float noise_estimate = 0.0f;
+  if (cov != NULL) {
+    for (int i = 0; i < nof_rxant && i < SRSRAN_MAX_PORTS; i++) {
+      float d = __real__ cov[i][i];
+      if (isfinite(d) && d > 0.0f) {
+        noise_estimate += d / nof_rxant;
+      }
+    }
+  }
+  srsran_predecoding_single_multi(y, h, x, NULL, nof_rxant, nof_symbols, scaling, noise_estimate);
+  return 0;
+}
+
 int srsran_predecoding_single_multi(cf_t*  y[SRSRAN_MAX_PORTS],
                                     cf_t*  h[SRSRAN_MAX_PORTS],
                                     cf_t*  x,

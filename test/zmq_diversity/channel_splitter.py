@@ -34,7 +34,8 @@ EPA_POWERS_DB = [0.0, -1.0, -1.0, -2.0, -3.0, -8.0, -20.8]
 class AntennaChain:
     """Impairment chain for one RX antenna."""
 
-    def __init__(self, idx, gain_db, phase_deg, delay_samp, fading, doppler, noise_dbfs, seed):
+    def __init__(self, idx, gain_db, phase_deg, delay_samp, fading, doppler, noise_dbfs, seed,
+                 interf_inr=None, interf_gain=1.0 + 0.0j):
         self.idx  = idx
         self.rng  = np.random.default_rng(seed)
         self.gain = 0.0 if gain_db is None else 10.0 ** (gain_db / 20.0)
@@ -42,6 +43,11 @@ class AntennaChain:
                             self.gain * math.sin(math.radians(phase_deg)))
         self.delay_buf = np.zeros(delay_samp, dtype=np.complex64) if delay_samp > 0 else None
         self.noise_std = 10.0 ** (noise_dbfs / 20.0) if noise_dbfs is not None else 0.0
+        # Rank-1 co-channel interferer: per-antenna amplitude for a shared waveform, INR dB above the noise
+        self.interf_amp = 0.0
+        if interf_inr is not None and self.noise_std > 0.0:
+            self.interf_amp = self.noise_std * (10.0 ** (interf_inr / 20.0))
+        self.interf_gain = interf_gain
         self.fading    = fading
         self.doppler   = max(0.01, doppler)
 
@@ -76,8 +82,11 @@ class AntennaChain:
         w   = w * np.sqrt(self.taps_pwr)
         return rho * self.h + math.sqrt(1.0 - rho * rho) * w
 
-    def process(self, x):
-        """Apply the impairment chain to one chunk of complex64 samples."""
+    def process(self, x, interf=None):
+        """Apply the impairment chain to one chunk of complex64 samples.
+
+        interf: optional shared unit-power interference waveform for this chunk (rank-1 spatial signature).
+        """
         y = x * self.gain
 
         if self.delay_buf is not None and len(self.delay_buf) > 0:
@@ -104,6 +113,9 @@ class AntennaChain:
                 y = out
             self.h = h_next
 
+        if interf is not None and self.interf_amp > 0.0:
+            y = y + interf * (self.interf_amp * self.interf_gain)
+
         if self.noise_std > 0.0:
             n = (self.rng.standard_normal(len(y)) + 1j * self.rng.standard_normal(len(y)))
             y = y + n * (self.noise_std / math.sqrt(2.0))
@@ -124,10 +136,15 @@ def main():
         ap.add_argument(f"--noise{a}", type=float, default=None, help="noise power in dBfs (absolute)")
     ap.add_argument("--fading", choices=["none", "rayleigh", "epa"], default="none")
     ap.add_argument("--doppler", type=float, default=5.0, help="max Doppler in Hz")
+    ap.add_argument("--interf-inr", type=float, default=None,
+                    help="add a rank-1 co-channel interferer this many dB above each antenna's noise")
     ap.add_argument("--stats-every", type=int, default=20000, help="chunks between stats prints")
     args = ap.parse_args()
 
     nof_ant = 1 if args.mode == "1rx" else 2
+    # Spatial signature of the interferer, deliberately different from typical signal phases
+    interf_sig = [1.0 + 0.0j, complex(math.cos(2.0), math.sin(2.0))]
+    interf_rng = np.random.default_rng(777)
     chains = []
     for a in range(nof_ant):
         gain = None if getattr(args, f"off{a}") else getattr(args, f"gain{a}")
@@ -138,7 +155,9 @@ def main():
                                    args.fading,
                                    args.doppler,
                                    getattr(args, f"noise{a}"),
-                                   seed=1000 + a))
+                                   seed=1000 + a,
+                                   interf_inr=args.interf_inr,
+                                   interf_gain=interf_sig[a]))
 
     ctx = zmq.Context()
     poller = zmq.Poller()
@@ -192,8 +211,12 @@ def main():
             if p > 1e-9:
                 active += 1
                 active_pwr.append(10.0 * math.log10(p))
+            interf = None
+            if args.interf_inr is not None and len(x):
+                interf = (interf_rng.standard_normal(len(x)) +
+                          1j * interf_rng.standard_normal(len(x))) * math.sqrt(0.5)
             for i, q in enumerate(queues):
-                q.append(chains[i].process(x).tobytes())
+                q.append(chains[i].process(x, interf).tobytes())
             chunks += 1
             if chunks % args.stats_every == 0:
                 med = np.median(active_pwr) if active_pwr else float("nan")

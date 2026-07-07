@@ -79,6 +79,19 @@ SRSRAN_API int srsran_predecoding_single_multi(cf_t*  y[SRSRAN_MAX_PORTS],
                                                float  scaling,
                                                float  noise_estimate);
 
+/* Single-layer MMSE-IRC: equalizes with an interference-plus-noise covariance instead of a scalar noise power.
+ * Solved in closed form for 2 RX antennas; any other antenna count or an unusable covariance falls back to
+ * MRC with the average diagonal noise (identical to srsran_predecoding_single_multi). Returns the number of
+ * symbols equalized with IRC, 0 if the MRC fallback was used, or SRSRAN_ERROR on invalid inputs.
+ */
+SRSRAN_API int srsran_predecoding_single_multi_cov(cf_t* y[SRSRAN_MAX_PORTS],
+                                                   cf_t* h[SRSRAN_MAX_PORTS],
+                                                   cf_t* x,
+                                                   int   nof_rxant,
+                                                   int   nof_symbols,
+                                                   float scaling,
+                                                   cf_t  cov[SRSRAN_MAX_PORTS][SRSRAN_MAX_PORTS]);
+
 SRSRAN_API int srsran_predecoding_diversity(cf_t* y,
                                             cf_t* h[SRSRAN_MAX_PORTS],
                                             cf_t* x[SRSRAN_MAX_LAYERS],
