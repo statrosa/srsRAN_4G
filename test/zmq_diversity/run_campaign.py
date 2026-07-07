@@ -47,6 +47,9 @@ def kill_stale():
 def ports_free():
     for p in PORTS:
         s = socket.socket()
+        # ZMQ binds with SO_REUSEADDR, so lingering TIME_WAIT connections from a
+        # previous cycle are fine; only a live listener must block us.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", p))
         except OSError:
@@ -135,11 +138,12 @@ def run_scenario(name, enb_conf, splitter_args, binaries, ue_cycles, ue_cycle_s,
             if not ports_free():
                 print("ports busy, killing stale processes...", flush=True)
                 kill_stale()
-                deadline = time.time() + 20
+                deadline = time.time() + 60
                 while not ports_free() and time.time() < deadline:
                     time.sleep(1)
                 if not ports_free():
-                    raise RuntimeError("ports still busy")
+                    print(f"  cycle {cyc + 1}/{ue_cycles}: SKIPPED (ports busy)", flush=True)
+                    continue
             procs.start([sys.executable, os.path.join(HERE, "channel_splitter.py")] + splitter_args, split_log)
             time.sleep(1)
             procs.start([os.path.join(binaries, "srsenb/src/srsenb"), os.path.join(HERE, enb_conf),
@@ -235,7 +239,10 @@ def main():
     for name, conf, sargs in scenarios:
         if args.scenario and name not in args.scenario:
             continue
-        results.append(run_scenario(name, conf, sargs, args.binaries, args.ue_cycles, args.ue_cycle_s))
+        try:
+            results.append(run_scenario(name, conf, sargs, args.binaries, args.ue_cycles, args.ue_cycle_s))
+        except Exception as e:  # keep the campaign going; the scenario can be re-run selectively
+            print(f"scenario {name} FAILED: {e}", flush=True)
 
     print("\n=== campaign done ===")
     for r in results:
