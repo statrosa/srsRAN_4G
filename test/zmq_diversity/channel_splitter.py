@@ -141,11 +141,20 @@ def main():
                                    seed=1000 + a))
 
     ctx = zmq.Context()
-    ue  = ctx.socket(zmq.REQ)
-    # Survive UE restarts: allow re-sending a request after the peer vanished
-    ue.setsockopt(zmq.REQ_RELAXED, 1)
-    ue.setsockopt(zmq.REQ_CORRELATE, 1)
-    ue.connect(args.ue_tx)
+    poller = zmq.Poller()
+
+    def fresh_ue_socket(old=None):
+        # Lazy-pirate reconnect: a strict REQ socket that lost its peer mid-request
+        # (e.g. the UE was restarted) must be recreated to leave the wait-for-reply state.
+        if old is not None:
+            poller.unregister(old)
+            old.close(linger=0)
+        sock = ctx.socket(zmq.REQ)
+        sock.connect(args.ue_tx)
+        poller.register(sock, zmq.POLLIN)
+        return sock
+
+    ue = fresh_ue_socket()
 
     reps = []
     for port in args.ports[:nof_ant]:
@@ -156,8 +165,6 @@ def main():
     queues  = [deque() for _ in reps]
     pending = [False] * len(reps)
 
-    poller = zmq.Poller()
-    poller.register(ue, zmq.POLLIN)
     for s in reps:
         poller.register(s, zmq.POLLIN)
 
@@ -200,7 +207,8 @@ def main():
 
         now = time.monotonic()
         if fetch_outstanding and now - fetch_sent_at > 2.0:
-            # The UE likely restarted and the request was lost; re-send (REQ_RELAXED)
+            # The UE likely restarted and the request was lost; rebuild the socket and re-send
+            ue = fresh_ue_socket(ue)
             ue.send(b"\xff")
             fetch_sent_at = now
 
