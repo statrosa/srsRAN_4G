@@ -1,0 +1,23 @@
+{
+  "scenario": "s5_rayleigh_1rx",
+  "enb_conf": "enb_1rx.conf",
+  "splitter_args": [
+    "--mode",
+    "1rx",
+    "--fading",
+    "rayleigh",
+    "--doppler",
+    "5",
+    "--noise0",
+    "68.9"
+  ],
+  "ra_transmissions": 27,
+  "ra_completions": 11,
+  "prach_detections": 24,
+  "prach_peak2avg_mean": 480.37916666666666,
+  "pusch_total": 74,
+  "pusch_crc_ok": 9,
+  "pusch_snr_mean": 3.0777777777777775,
+  "pusch_snr_min": 0.4,
+  "pusch_ta_absmax": 6.4
+}
