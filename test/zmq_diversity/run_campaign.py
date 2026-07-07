@@ -118,43 +118,49 @@ def count_ue_console(path):
 
 def run_scenario(name, enb_conf, splitter_args, binaries, ue_cycles, ue_cycle_s, tag_extra=""):
     print(f"\n=== scenario {name} ({enb_conf}, splitter: {' '.join(splitter_args)}) ===", flush=True)
-    procs = Procs()
-    enb_log     = os.path.join(RESULTS, f"{name}_enb.log")
-    enb_console = os.path.join(RESULTS, f"{name}_enb_console.log")
-    split_log   = os.path.join(RESULTS, f"{name}_splitter.log")
-    try:
-        if not ports_free():
-            # Kill stale processes from previous runs before giving up
-            print("ports busy, killing stale processes...", flush=True)
-            kill_stale()
-            deadline = time.time() + 20
-            while not ports_free() and time.time() < deadline:
-                time.sleep(1)
-            if not ports_free():
-                raise RuntimeError("ports still busy")
-        procs.start([sys.executable, os.path.join(HERE, "channel_splitter.py")] + splitter_args, split_log)
-        time.sleep(1)
-        procs.start([os.path.join(binaries, "srsenb/src/srsenb"), os.path.join(HERE, enb_conf),
-                     "--log.filename=" + enb_log], enb_console)
-        time.sleep(6)
 
-        ue_tx_total = ue_comp_total = 0
-        for cyc in range(ue_cycles):
-            ue_console = os.path.join(RESULTS, f"{name}_ue{cyc}.log")
+    # The whole stack (splitter + eNB + UE) is restarted for every cycle: the eNB
+    # sample timeline must start together with the UE's, otherwise the UL stream
+    # lands at an arbitrary sub-subframe offset after a UE restart and PRACH
+    # falls outside the eNB detection windows.
+    ue_tx_total = ue_comp_total = 0
+    enb = {"prach": [], "pusch": []}
+    for cyc in range(ue_cycles):
+        procs = Procs()
+        enb_log     = os.path.join(RESULTS, f"{name}_c{cyc}_enb.log")
+        enb_console = os.path.join(RESULTS, f"{name}_c{cyc}_enb_console.log")
+        split_log   = os.path.join(RESULTS, f"{name}_c{cyc}_splitter.log")
+        ue_console  = os.path.join(RESULTS, f"{name}_ue{cyc}.log")
+        try:
+            if not ports_free():
+                print("ports busy, killing stale processes...", flush=True)
+                kill_stale()
+                deadline = time.time() + 20
+                while not ports_free() and time.time() < deadline:
+                    time.sleep(1)
+                if not ports_free():
+                    raise RuntimeError("ports still busy")
+            procs.start([sys.executable, os.path.join(HERE, "channel_splitter.py")] + splitter_args, split_log)
+            time.sleep(1)
+            procs.start([os.path.join(binaries, "srsenb/src/srsenb"), os.path.join(HERE, enb_conf),
+                         "--log.filename=" + enb_log], enb_console)
+            time.sleep(6)
             ue = procs.start([os.path.join(binaries, "srsue/src/srsue"), os.path.join(HERE, "ue.conf"),
                               "--log.filename=" + os.path.join(RESULTS, f"{name}_ue{cyc}_stack.log")],
                              ue_console)
             time.sleep(ue_cycle_s)
-            procs.kill(ue)
-            time.sleep(2)
-            tx, comp = count_ue_console(ue_console)
-            ue_tx_total += tx
-            ue_comp_total += comp
-            print(f"  cycle {cyc + 1}/{ue_cycles}: ra_tx={tx} ra_complete={comp}", flush=True)
-    finally:
-        procs.kill_all()
+        finally:
+            procs.kill_all()
 
-    enb = parse_enb_log(enb_log)
+        cyc_enb = parse_enb_log(enb_log)
+        enb["prach"].extend(cyc_enb["prach"])
+        enb["pusch"].extend(cyc_enb["pusch"])
+        tx, comp = count_ue_console(ue_console)
+        ue_tx_total += tx
+        ue_comp_total += comp
+        print(f"  cycle {cyc + 1}/{ue_cycles}: ra_tx={tx} ra_complete={comp} "
+              f"prach_det={len(cyc_enb['prach'])} msg3_ok={sum(1 for x in cyc_enb['pusch'] if x['crc'])}"
+              f"/{len(cyc_enb['pusch'])}", flush=True)
     ok  = [p for p in enb["pusch"] if p["crc"]]
     res = {
         "scenario": name,
