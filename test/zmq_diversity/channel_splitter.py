@@ -18,6 +18,7 @@ REP endpoint per eNB RX antenna.
 import argparse
 import math
 import sys
+import time
 from collections import deque
 
 import numpy as np
@@ -141,6 +142,9 @@ def main():
 
     ctx = zmq.Context()
     ue  = ctx.socket(zmq.REQ)
+    # Survive UE restarts: allow re-sending a request after the peer vanished
+    ue.setsockopt(zmq.REQ_RELAXED, 1)
+    ue.setsockopt(zmq.REQ_CORRELATE, 1)
     ue.connect(args.ue_tx)
 
     reps = []
@@ -158,6 +162,7 @@ def main():
         poller.register(s, zmq.POLLIN)
 
     fetch_outstanding = False
+    fetch_sent_at     = 0.0
     chunks       = 0
     active       = 0
     active_pwr   = deque(maxlen=512)  # dBfs of recent active chunks
@@ -193,9 +198,16 @@ def main():
                 s.send(queues[i].popleft())
                 pending[i] = False
 
+        now = time.monotonic()
+        if fetch_outstanding and now - fetch_sent_at > 2.0:
+            # The UE likely restarted and the request was lost; re-send (REQ_RELAXED)
+            ue.send(b"\xff")
+            fetch_sent_at = now
+
         if not fetch_outstanding and min(len(q) for q in queues) < 8:
             ue.send(b"\xff")
             fetch_outstanding = True
+            fetch_sent_at     = now
 
 
 if __name__ == "__main__":

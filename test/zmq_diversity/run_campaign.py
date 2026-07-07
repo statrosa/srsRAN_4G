@@ -31,6 +31,19 @@ RE_PUSCH = re.compile(r"PUSCH: .*rnti=0x([0-9a-f]+).*crc=(OK|KO).*snr=([\-\d.]+)
 RE_PRACH = re.compile(r"PRACH: .*preamble=(\d+), offset=([\-\d.]+) us, peak2avg=([\-\d.]+)")
 
 
+def kill_stale():
+    for pat in (["-x", "srsenb"], ["-x", "srsue"], ["-f", "channel_splitter.py"]):
+        subprocess.run(["pkill", "-9"] + pat, check=False)
+    time.sleep(1)
+    for pat in (["-x", "srsenb"], ["-x", "srsue"], ["-f", "channel_splitter.py"]):
+        r = subprocess.run(["pgrep"] + pat, capture_output=True, text=True)
+        for pid in r.stdout.split():
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+
 def ports_free():
     for p in PORTS:
         s = socket.socket()
@@ -113,10 +126,10 @@ def run_scenario(name, enb_conf, splitter_args, binaries, ue_cycles, ue_cycle_s,
         if not ports_free():
             # Kill stale processes from previous runs before giving up
             print("ports busy, killing stale processes...", flush=True)
-            subprocess.run(["pkill", "-9", "-x", "srsenb"], check=False)
-            subprocess.run(["pkill", "-9", "-x", "srsue"], check=False)
-            subprocess.run(["pkill", "-9", "-f", "channel_splitter.py"], check=False)
-            time.sleep(5)
+            kill_stale()
+            deadline = time.time() + 20
+            while not ports_free() and time.time() < deadline:
+                time.sleep(1)
             if not ports_free():
                 raise RuntimeError("ports still busy")
         procs.start([sys.executable, os.path.join(HERE, "channel_splitter.py")] + splitter_args, split_log)
