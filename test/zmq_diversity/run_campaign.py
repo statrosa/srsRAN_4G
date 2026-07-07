@@ -111,7 +111,11 @@ def run_scenario(name, enb_conf, splitter_args, binaries, ue_cycles, ue_cycle_s,
     split_log   = os.path.join(RESULTS, f"{name}_splitter.log")
     try:
         if not ports_free():
-            print("ports busy, waiting...", flush=True)
+            # Kill stale processes from previous runs before giving up
+            print("ports busy, killing stale processes...", flush=True)
+            subprocess.run(["pkill", "-9", "-x", "srsenb"], check=False)
+            subprocess.run(["pkill", "-9", "-x", "srsue"], check=False)
+            subprocess.run(["pkill", "-9", "-f", "channel_splitter.py"], check=False)
             time.sleep(5)
             if not ports_free():
                 raise RuntimeError("ports still busy")
