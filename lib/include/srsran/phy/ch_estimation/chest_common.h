@@ -41,6 +41,19 @@ SRSRAN_API void srsran_chest_average_pilots(cf_t*    input,
                                             uint32_t nof_symbols,
                                             uint32_t filter_len);
 
+/**
+ * Smooths one symbol of pilot estimates like srsran_chest_average_pilots, but handles the band edges by
+ * truncating the filter to the taps that fall inside the allocation and renormalizing them, instead of
+ * linearly extrapolating beyond the edges. Extrapolation amplifies the noise of the edge outputs above the
+ * raw least-squares estimates; truncation keeps them at or below the interior noise level, which matters
+ * for narrow allocations where the edges are a large fraction of the samples.
+ */
+SRSRAN_API void srsran_chest_smooth_pilots_trunc(const cf_t*  input,
+                                                 cf_t*        output,
+                                                 const float* filter,
+                                                 uint32_t     nrefs,
+                                                 uint32_t     filter_len);
+
 SRSRAN_API uint32_t srsran_chest_set_smooth_filter3_coeff(float* smooth_filter, float w);
 
 SRSRAN_API float srsran_chest_estimate_noise_pilots(cf_t* noisy, cf_t* noiseless, cf_t* noise_vec, uint32_t nof_pilots);

@@ -187,6 +187,62 @@ uint32_t srsran_chest_set_smooth_filter_gauss(float* filter, uint32_t order, flo
   return filterlen;
 }
 
+void srsran_chest_smooth_pilots_trunc(const cf_t* input,
+                                      cf_t*       output,
+                                      const float* filter,
+                                      uint32_t    nrefs,
+                                      uint32_t    filter_len)
+{
+  uint32_t M = filter_len;
+  uint32_t h = M / 2;
+
+  if (M == 0 || nrefs == 0 || M > SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN) {
+    return;
+  }
+
+  uint32_t first_interior = SRSRAN_MIN(h, nrefs);
+  uint32_t last_interior  = nrefs > h ? nrefs - h : first_interior;
+  if (last_interior < first_interior) {
+    last_interior = first_interior;
+  }
+
+  // Band edges: drop the taps that fall outside the allocation and renormalize the rest, so edge outputs
+  // stay unbiased for a flat channel and their noise never exceeds the interior's (unlike linear
+  // extrapolation, which amplifies noise at the edge samples)
+  for (uint32_t i = 0; i < first_interior; i++) {
+    cf_t  acc  = 0.0f;
+    float norm = 0.0f;
+    for (uint32_t m = (h > i) ? (h - i) : 0; m < M; m++) {
+      uint32_t k = i + m - h;
+      if (k >= nrefs) {
+        break;
+      }
+      acc += filter[m] * input[k];
+      norm += filter[m];
+    }
+    output[i] = (norm > 0.0f) ? (acc / norm) : input[i];
+  }
+
+  // Interior: full filter, same as srsran_conv_same_cf
+  for (uint32_t i = first_interior; i < last_interior; i++) {
+    output[i] = srsran_vec_dot_prod_cfc(&input[i - h], filter, M);
+  }
+
+  for (uint32_t i = last_interior; i < nrefs; i++) {
+    cf_t  acc  = 0.0f;
+    float norm = 0.0f;
+    for (uint32_t m = (h > i) ? (h - i) : 0; m < M; m++) {
+      uint32_t k = i + m - h;
+      if (k >= nrefs) {
+        break;
+      }
+      acc += filter[m] * input[k];
+      norm += filter[m];
+    }
+    output[i] = (norm > 0.0f) ? (acc / norm) : input[i];
+  }
+}
+
 void srsran_chest_average_pilots(cf_t*    input,
                                  cf_t*    output,
                                  float*   filter,

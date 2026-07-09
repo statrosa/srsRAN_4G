@@ -84,10 +84,18 @@ typedef struct {
   uint32_t smooth_filter_len;
   float    smooth_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
 
+  // PUSCH-only adaptive smoothing state; PUCCH and SRS keep using smooth_filter
+  bool     pusch_adaptive_smoothing;
+  float    pusch_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
+  uint32_t pusch_filter_len;
+  float    pusch_snr_prior;
+
   // Cached noise bias of the smoothing operator, recomputed when the filter or allocation width changes
   float    noise_bias;
   uint32_t noise_bias_filter_len;
   uint32_t noise_bias_nrefs;
+  bool     noise_bias_trunc;
+  float    noise_bias_tap0;
 
   srsran_interp_linsrsran_vec_t srsran_interp_linvec;
 

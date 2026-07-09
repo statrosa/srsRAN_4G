@@ -93,6 +93,8 @@ int srsran_chest_ul_init(srsran_chest_ul_t* q, uint32_t max_prb)
     q->smooth_filter_len = 3;
     srsran_chest_set_smooth_filter3_coeff(q->smooth_filter, 0.3333);
 
+    q->pusch_adaptive_smoothing = true;
+
     q->dmrs_signal_configured = false;
 
     if (srsran_refsignal_dmrs_pusch_pregen_init(&q->dmrs_pregen, max_prb)) {
@@ -204,7 +206,14 @@ void srsran_chest_ul_pregen(srsran_chest_ul_t*                 q,
 }
 
 /* Uses the difference between the averaged and non-averaged pilot estimates */
-static float estimate_noise_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nslots, uint32_t nrefs, uint32_t n_prb[2])
+static float estimate_noise_pilots(srsran_chest_ul_t* q,
+                                   cf_t*              ce,
+                                   uint32_t           nslots,
+                                   uint32_t           nrefs,
+                                   uint32_t           n_prb[2],
+                                   const float*       filter,
+                                   uint32_t           filter_len,
+                                   bool               trunc_edges)
 {
   float power = 0;
   for (int i = 0; i < nslots; i++) {
@@ -220,11 +229,13 @@ static float estimate_noise_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nslo
   // The smoothing filter attenuates part of the noise, so the raw-minus-smoothed residual measures only a
   // fraction of it. Divide by the exact fraction for this filter and allocation width (band edges
   // included) to get an unbiased noise estimate.
-  if (q->noise_bias_filter_len != q->smooth_filter_len || q->noise_bias_nrefs != nrefs ||
-      !isnormal(q->noise_bias)) {
-    q->noise_bias            = srsran_chest_estimate_noise_bias(q->smooth_filter, q->smooth_filter_len, nrefs, true);
-    q->noise_bias_filter_len = q->smooth_filter_len;
+  if (q->noise_bias_filter_len != filter_len || q->noise_bias_nrefs != nrefs || q->noise_bias_trunc != trunc_edges ||
+      q->noise_bias_tap0 != filter[0] || !isnormal(q->noise_bias)) {
+    q->noise_bias            = srsran_chest_estimate_noise_bias(filter, filter_len, nrefs, !trunc_edges);
+    q->noise_bias_filter_len = filter_len;
     q->noise_bias_nrefs      = nrefs;
+    q->noise_bias_trunc      = trunc_edges;
+    q->noise_bias_tap0       = filter[0];
   }
 
   if (isnormal(q->noise_bias)) {
@@ -277,17 +288,76 @@ static void interpolate_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nslots, 
 #endif
 }
 
-static void
-average_pilots(srsran_chest_ul_t* q, cf_t* input, cf_t* ce, uint32_t nslots, uint32_t nrefs, uint32_t n_prb[2])
+static void average_pilots(srsran_chest_ul_t* q,
+                           cf_t*              input,
+                           cf_t*              ce,
+                           uint32_t           nslots,
+                           uint32_t           nrefs,
+                           uint32_t           n_prb[2],
+                           const float*       filter,
+                           uint32_t           filter_len,
+                           bool               trunc_edges)
 {
   for (uint32_t i = 0; i < nslots; i++) {
-    srsran_chest_average_pilots(
-        &input[i * nrefs],
-        &ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE],
-        q->smooth_filter,
-        nrefs,
-        1,
-        q->smooth_filter_len);
+    cf_t* out = &ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE];
+    if (trunc_edges) {
+      srsran_chest_smooth_pilots_trunc(&input[i * nrefs], out, filter, nrefs, filter_len);
+    } else {
+      srsran_chest_average_pilots(&input[i * nrefs], out, (float*)filter, nrefs, 1, filter_len);
+    }
+  }
+}
+
+// SNR tier limits for the adaptive PUSCH smoothing filter (linear power)
+#define PUSCH_SMOOTH_SNR_HIGH 20.0f // ~13 dB: 16QAM+ operating region, keep the legacy short filter
+#define PUSCH_SMOOTH_SNR_LOW 3.16f  // ~5 dB: below this, smooth as much as the channel plausibly allows
+
+/**
+ * Selects the PUSCH frequency-domain smoothing filter for the current grant from a cheap,
+ * filter-independent SNR pre-estimate. Second differences of the LS pilot estimates cancel any locally
+ * linear channel, so their average power is 6*N0 plus a residual channel-curvature term that is negligible
+ * at 15 kHz subcarrier spacing. At low SNR a longer Gaussian filter trades a little frequency resolution
+ * for a large noise reduction, which is where small QPSK grants operate; at high SNR the legacy short
+ * filter preserves frequency selectivity. The result is written to q->pusch_filter/pusch_filter_len and
+ * the pre-estimated SNR to q->pusch_snr_prior.
+ */
+static void pusch_select_filter(srsran_chest_ul_t* q, uint32_t nrefs_sym, uint32_t nslots)
+{
+  // Raw noise pre-estimate from pilot second differences, averaged over both slots
+  float n0_raw = 0.0f;
+  for (uint32_t s = 0; s < nslots; s++) {
+    const cf_t* p = &q->pilot_estimates[s * nrefs_sym];
+    cf_t*       d = q->tmp_noise; // free at this point, used as scratch
+    srsran_vec_sum_ccc(&p[0], &p[2], d, nrefs_sym - 2);
+    srsran_vec_sub_ccc(d, &p[1], d, nrefs_sym - 2);
+    srsran_vec_sub_ccc(d, &p[1], d, nrefs_sym - 2);
+    // E{|n[k-1] - 2n[k] + n[k+1]|^2} = 6*N0 for white noise
+    n0_raw += srsran_vec_avg_power_cf(d, nrefs_sym - 2) / 6.0f / (float)nslots;
+  }
+
+  float epre      = srsran_vec_avg_power_cf(q->pilot_recv_signal, nslots * nrefs_sym);
+  float snr_prior = isnormal(n0_raw) ? (epre / n0_raw) : INFINITY;
+  q->pusch_snr_prior = snr_prior;
+
+  uint32_t len;
+  if (snr_prior >= PUSCH_SMOOTH_SNR_HIGH) {
+    len = 3;
+  } else if (snr_prior >= PUSCH_SMOOTH_SNR_LOW) {
+    len = 5;
+  } else {
+    // Scale with the allocation width but never wider than 9 taps (135 kHz), which stays below the
+    // coherence bandwidth of even long-delay-spread channels
+    len = (nrefs_sym / 3) | 1;
+    len = SRSRAN_MAX(5, SRSRAN_MIN(9, len));
+  }
+
+  if (len != q->pusch_filter_len) {
+    if (len == 3) {
+      // Same taps as the legacy filter; only the band-edge handling differs
+      q->pusch_filter_len = srsran_chest_set_smooth_filter3_coeff(q->pusch_filter, 0.3333f);
+    } else {
+      q->pusch_filter_len = srsran_chest_set_smooth_filter_gauss(q->pusch_filter, len - 1, (float)len / 4.0f);
+    }
   }
 }
 
@@ -302,6 +372,9 @@ average_pilots(srsran_chest_ul_t* q, cf_t* input, cf_t* ce, uint32_t nslots, uin
  * @param meas_ta_en enables or disables the Time Alignment error measurement
  * @param write_estimates Write channel estimation in res, (true for DMRS and false for SRS)
  * @param n_prb Resource block start for the grant, set to zero for Sounding Reference Signals
+ * @param filter frequency-domain smoothing filter taps (a zero filter_len disables smoothing)
+ * @param filter_len number of smoothing filter taps
+ * @param trunc_edges band-edge handling: true truncates and renormalizes the filter, false extrapolates
  * @param res UL channel estimation result
  */
 static void chest_ul_estimate(srsran_chest_ul_t*     q,
@@ -312,6 +385,9 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
                               bool                   use_cedron_alg,
                               bool                   write_estimates,
                               uint32_t               n_prb[SRSRAN_NOF_SLOTS_PER_SF],
+                              const float*           filter,
+                              uint32_t               filter_len,
+                              bool                   trunc_edges,
                               srsran_chest_ul_res_t* res)
 {
   // Calculate CFO
@@ -356,15 +432,17 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
   }
 
   if (res->ce != NULL) {
-    if (q->smooth_filter_len > 0) {
-      average_pilots(q, q->pilot_estimates, res->ce, nslots, nrefs_sym, n_prb);
+    if (filter_len > 0) {
+      average_pilots(q, q->pilot_estimates, res->ce, nslots, nrefs_sym, n_prb, filter, filter_len, trunc_edges);
+
+      // If averaging, compute noise from difference between received and averaged estimates. Do it before
+      // any further processing of the DMRS estimates so the residual matches the modeled filter bias.
+      res->noise_estimate =
+          estimate_noise_pilots(q, res->ce, nslots, nrefs_sym, n_prb, filter, filter_len, trunc_edges);
 
       if (write_estimates) {
         interpolate_pilots(q, res->ce, nslots, nrefs_sym, n_prb);
       }
-
-      // If averaging, compute noise from difference between received and averaged estimates
-      res->noise_estimate = estimate_noise_pilots(q, res->ce, nslots, nrefs_sym, n_prb);
     } else {
       // Copy estimates to CE vector without averaging
       for (int i = 0; i < nslots; i++) {
@@ -436,6 +514,17 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                            q->pilot_estimates,
                            nrefs_sf);
 
+  // Select the frequency-domain smoothing for this grant. PUCCH and SRS keep the shared legacy filter.
+  const float* filter      = q->smooth_filter;
+  uint32_t     filter_len  = q->smooth_filter_len;
+  bool         trunc_edges = false;
+  if (q->pusch_adaptive_smoothing) {
+    pusch_select_filter(q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF);
+    filter      = q->pusch_filter;
+    filter_len  = q->pusch_filter_len;
+    trunc_edges = true;
+  }
+
   // Estimate. Use the post-hopping PRB positions (n_prb_tilde): DMRS extraction above and the PUSCH
   // decoder both index the grid by them, and they differ from n_prb when PUSCH frequency hopping is active
   chest_ul_estimate(q,
@@ -446,6 +535,9 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                     cfg->use_cedron_alg,
                     true,
                     cfg->grant.n_prb_tilde,
+                    filter,
+                    filter_len,
+                    trunc_edges,
                     res);
 
   return 0;
@@ -660,7 +752,7 @@ int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
 
   // Estimate
   uint32_t n_prb[2] = {};
-  chest_ul_estimate(q, 1, n_srs_re, 1, true, false, false, n_prb, res);
+  chest_ul_estimate(q, 1, n_srs_re, 1, true, false, false, n_prb, q->smooth_filter, q->smooth_filter_len, false, res);
 
   return SRSRAN_SUCCESS;
 }
