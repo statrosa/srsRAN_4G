@@ -52,12 +52,16 @@ add_lte_test(chest_test_ul_cellid2 chest_test_ul -c 2 -r 50)
 
 # Estimation quality on narrow allocations: -M bounds the channel estimate NMSE (relative to N0, raw LS
 # equals 1.0) and -E bounds the noise estimate error in dB
-add_lte_test(chest_test_ul_quality_prb1_snr0 chest_test_ul -r 50 -L 1 -s 0 -N 200 -M 0.35 -E 0.5)
-add_lte_test(chest_test_ul_quality_prb1_snr10 chest_test_ul -r 50 -L 1 -s 10 -N 200 -M 0.35 -E 0.5)
+add_lte_test(chest_test_ul_quality_prb1_snr0 chest_test_ul -r 50 -L 1 -s 0 -N 200 -M 0.25 -E 0.5)
+add_lte_test(chest_test_ul_quality_prb1_snr10 chest_test_ul -r 50 -L 1 -s 10 -N 200 -M 0.25 -E 0.5)
 add_lte_test(chest_test_ul_quality_prb1_snr20 chest_test_ul -r 50 -L 1 -s 20 -N 200 -M 0.45 -E 0.5)
-add_lte_test(chest_test_ul_quality_prb2_snr0 chest_test_ul -r 50 -L 2 -s 0 -N 200 -M 0.20 -E 0.5)
-add_lte_test(chest_test_ul_quality_prb4_snr0 chest_test_ul -r 50 -L 4 -s 0 -N 200 -M 0.20 -E 0.5)
-add_lte_test(chest_test_ul_quality_prb4_snr10 chest_test_ul -r 50 -L 4 -s 10 -N 200 -M 0.32 -E 0.5)
+add_lte_test(chest_test_ul_quality_prb2_snr0 chest_test_ul -r 50 -L 2 -s 0 -N 200 -M 0.13 -E 0.5)
+add_lte_test(chest_test_ul_quality_prb4_snr0 chest_test_ul -r 50 -L 4 -s 0 -N 200 -M 0.12 -E 0.5)
+add_lte_test(chest_test_ul_quality_prb4_snr10 chest_test_ul -r 50 -L 4 -s 10 -N 200 -M 0.17 -E 0.5)
+# Cross-slot DMRS averaging under CFO: small CFO is phase-aligned and combined; large CFO falls back to
+# per-slot estimates
+add_lte_test(chest_test_ul_quality_cfo50 chest_test_ul -r 50 -L 1 -s 0 -f 50 -N 200 -M 0.28 -E 0.5)
+add_lte_test(chest_test_ul_quality_cfo300 chest_test_ul -r 50 -L 1 -s 0 -f 300 -N 200 -M 0.45 -E 0.5)
 add_lte_test(chest_test_ul_quality_nonoise chest_test_ul -r 50 -L 2 -N 20 -M 0.0001)
 # Intra-subframe frequency hopping: CE must be written at each slot's actual (post-hopping) PRBs and the
 # cross-slot CFO estimate flagged invalid
