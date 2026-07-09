@@ -110,6 +110,17 @@ int srsran_chest_ul_init(srsran_chest_ul_t* q, uint32_t max_prb)
       ERROR("Error initializing cedron freq estimation algorithm.");
       goto clean_exit;
     }
+
+    // Delay-domain denoising transforms, unitary in each direction so fwd+bwd is an identity. Planned at
+    // the maximum width so per-grant replans (bounded by init_size) never allocate.
+    if (srsran_dft_plan_c(&q->dft_fwd, MAX_REFS_SYM, SRSRAN_DFT_FORWARD) ||
+        srsran_dft_plan_c(&q->dft_bwd, MAX_REFS_SYM, SRSRAN_DFT_BACKWARD)) {
+      ERROR("Error initializing delay-domain DFT plans");
+      goto clean_exit;
+    }
+    srsran_dft_plan_set_norm(&q->dft_fwd, true);
+    srsran_dft_plan_set_norm(&q->dft_bwd, true);
+    q->dft_size = MAX_REFS_SYM;
   }
 
   ret = SRSRAN_SUCCESS;
@@ -130,6 +141,8 @@ void srsran_chest_ul_free(srsran_chest_ul_t* q)
   }
   srsran_interp_linear_vector_free(&q->srsran_interp_linvec);
   srsran_cedron_freq_est_free(&q->srsran_cedron_freq_est);
+  srsran_dft_plan_free(&q->dft_fwd);
+  srsran_dft_plan_free(&q->dft_bwd);
 
   if (q->pilot_estimates) {
     free(q->pilot_estimates);
@@ -218,6 +231,8 @@ typedef struct {
   const float* filter;               // frequency-smoothing filter taps (zero filter_len disables smoothing)
   uint32_t     filter_len;           // number of filter taps
   bool         trunc_edges;          // true: truncate+renormalize at band edges; false: linear extrapolation
+  uint32_t     dft_half_win;         // >0: smooth by projecting onto the delay bins |d| <= dft_half_win
+                                     // (2*dft_half_win+1 bins total) instead of applying the FIR filter
   float        derot_cfo;            // pilot phase slope removed before smoothing, in normalized frequency
                                      // units (cycles/sample); re-applied to the estimates (0 disables)
   float        cross_slot_max_phase; // cross-slot averaging gate in radians (0 disables)
@@ -267,6 +282,25 @@ static float estimate_noise_pilots(srsran_chest_ul_t*     q,
   const float* filter      = proc->filter;
   uint32_t     filter_len  = proc->filter_len;
   bool         trunc_edges = proc->trunc_edges;
+
+  if (proc->dft_half_win > 0) {
+    float power = 0;
+    for (int i = 0; i < nslots; i++) {
+      power += srsran_chest_estimate_noise_pilots(
+          &q->pilot_estimates[i * nrefs],
+          &ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE],
+          q->tmp_noise,
+          nrefs);
+    }
+    power /= nslots;
+    // The delay-domain smoother is an orthogonal projection, so the residual contains exactly the noise
+    // that fell in the discarded bins: the bias factor is the discarded fraction, with no edge effects
+    uint32_t keep = 2 * proc->dft_half_win + 1;
+    if (keep < nrefs) {
+      return power * (float)nrefs / (float)(nrefs - keep);
+    }
+    return power;
+  }
 
   float power = 0;
   for (int i = 0; i < nslots; i++) {
@@ -351,7 +385,14 @@ static void average_pilots(srsran_chest_ul_t*     q,
 {
   for (uint32_t i = 0; i < nslots; i++) {
     cf_t* out = &ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE];
-    if (proc->trunc_edges) {
+    if (proc->dft_half_win > 0) {
+      // Delay-domain projection: any within-CP channel lives in the kept bins (TA de-rotation centered the
+      // mean delay at bin 0), so it passes undistorted while the noise of the discarded bins is removed
+      cf_t* delay = q->tmp_noise; // scratch, free at this point
+      srsran_dft_run_c(&q->dft_fwd, &input[i * nrefs], delay);
+      srsran_vec_cf_zero(&delay[proc->dft_half_win + 1], nrefs - 2 * proc->dft_half_win - 1);
+      srsran_dft_run_c(&q->dft_bwd, delay, out);
+    } else if (proc->trunc_edges) {
       srsran_chest_smooth_pilots_trunc(&input[i * nrefs], out, proc->filter, nrefs, proc->filter_len);
     } else {
       srsran_chest_average_pilots(&input[i * nrefs], out, (float*)proc->filter, nrefs, 1, proc->filter_len);
@@ -362,6 +403,14 @@ static void average_pilots(srsran_chest_ul_t*     q,
 // SNR tier limits for the adaptive PUSCH smoothing filter (linear power)
 #define PUSCH_SMOOTH_SNR_HIGH 20.0f // ~13 dB: 16QAM+ operating region, keep the legacy short filter
 #define PUSCH_SMOOTH_SNR_LOW 3.16f  // ~5 dB: below this, smooth as much as the channel plausibly allows
+
+// Delay-domain denoising engages for allocations of at least this many pilots (8 PRB): below it the
+// kept-bin fraction is too large for the projection to beat the FIR tiers
+#define PUSCH_DFT_MIN_NREFS 96
+// The channel delay spread is physically bounded by the normal cyclic prefix
+#define PUSCH_DFT_DELAY_SPAN_S 4.7e-6f
+// Extra kept bins on each side, absorbing the sinc leakage of fractional-delay paths
+#define PUSCH_DFT_MARGIN_BINS 3
 
 // Cross-slot DMRS averaging engages only when the pilot phase drift over 0.5 ms stays below a threshold,
 // i.e. the channel is time-flat (residual CFO below ~64 Hz and low Doppler). Since the combining aligns
@@ -638,6 +687,30 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
       proc.cross_slot_max_phase = SRSRAN_MAX(
           PUSCH_CROSS_SLOT_MAX_PHASE_RAD,
           SRSRAN_MIN(PUSCH_CROSS_SLOT_PHASE_CAP_RAD, PUSCH_CROSS_SLOT_PHASE_NSTD * phase_std));
+    }
+  }
+
+  // Wide grants: project onto the delay bins a within-CP channel can occupy instead of FIR smoothing.
+  // The mean delay was centered at bin 0 by the TA de-rotation, so a symmetric window of half the CP
+  // (plus a leakage margin) covers the physical delay spread. The channel passes undistorted at any SNR,
+  // so the projection replaces the FIR whenever it also removes more noise: its noise gain is the
+  // kept-bin fraction, the FIR's is the squared norm of its taps.
+  if (q->pusch_opts.dft_denoise && nrefs_sym >= PUSCH_DFT_MIN_NREFS) {
+    uint32_t half_win =
+        (uint32_t)ceilf(0.5f * PUSCH_DFT_DELAY_SPAN_S * 15e3f * (float)nrefs_sym) + PUSCH_DFT_MARGIN_BINS;
+    float fir_gain = 0.0f;
+    for (uint32_t i = 0; i < proc.filter_len; i++) {
+      fir_gain += proc.filter[i] * proc.filter[i];
+    }
+    if ((float)(2 * half_win + 1) < fir_gain * (float)nrefs_sym) {
+      if (q->dft_size != (uint32_t)nrefs_sym) {
+        if (srsran_dft_replan_c(&q->dft_fwd, nrefs_sym) || srsran_dft_replan_c(&q->dft_bwd, nrefs_sym)) {
+          ERROR("Error replanning delay-domain DFT to %d points", nrefs_sym);
+          return SRSRAN_ERROR;
+        }
+        q->dft_size = (uint32_t)nrefs_sym;
+      }
+      proc.dft_half_win = half_win;
     }
   }
 

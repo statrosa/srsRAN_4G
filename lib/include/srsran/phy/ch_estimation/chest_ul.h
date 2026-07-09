@@ -41,6 +41,7 @@
 #include "srsran/phy/ch_estimation/cedron_freq_estimator.h"
 #include "srsran/phy/ch_estimation/chest_common.h"
 #include "srsran/phy/ch_estimation/refsignal_ul.h"
+#include "srsran/phy/dft/dft.h"
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/phy/phch/pucch_cfg.h"
 #include "srsran/phy/phch/pusch_cfg.h"
@@ -113,6 +114,12 @@ typedef struct {
   float                        pusch_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
   uint32_t                     pusch_filter_len;
   float                        pusch_snr_prior;
+
+  // Delay-domain denoising transforms for wide PUSCH grants; planned once at the maximum width and
+  // replanned per allocation width
+  srsran_dft_plan_t dft_fwd;
+  srsran_dft_plan_t dft_bwd;
+  uint32_t          dft_size;
 
   // Cached noise bias of the smoothing operator, recomputed when the filter or allocation width changes
   float    noise_bias;

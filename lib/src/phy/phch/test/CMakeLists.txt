@@ -493,6 +493,8 @@ add_lte_test(pusch_test_chest_qpsk_L4_snr3 pusch_test -n 50 -L 4 -m 4 -p use_che
 add_lte_test(pusch_test_chest_hop_type1_snr5 pusch_test -n 50 -L 4 -m 4 -F 0 -p use_chest 1 -p snr_db 5)
 add_lte_test(pusch_test_chest_hop_type2 pusch_test -n 50 -R 162 -m 10 -F 3 -p use_chest 1)
 add_lte_test(pusch_test_chest_hop_type2_snr5 pusch_test -n 50 -R 162 -m 4 -F 3 -p use_chest 1 -p snr_db 5)
+# Wide grant decoded through the delay-domain denoising path (16QAM at 10 dB)
+add_lte_test(pusch_test_chest_16qam_L12_snr10 pusch_test -n 50 -L 12 -m 12 -p use_chest 1 -p snr_db 10)
 
 if (${ENABLE_ALL_TEST})
   # All valid number of PRBs for PUSCH
