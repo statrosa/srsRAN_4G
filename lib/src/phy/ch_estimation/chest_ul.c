@@ -218,8 +218,43 @@ typedef struct {
   const float* filter;               // frequency-smoothing filter taps (zero filter_len disables smoothing)
   uint32_t     filter_len;           // number of filter taps
   bool         trunc_edges;          // true: truncate+renormalize at band edges; false: linear extrapolation
+  float        derot_cfo;            // pilot phase slope removed before smoothing, in normalized frequency
+                                     // units (cycles/sample); re-applied to the estimates (0 disables)
   float        cross_slot_max_phase; // cross-slot averaging gate in radians (0 disables)
 } chest_ul_proc_t;
+
+/**
+ * Mean phase slope of the LS pilot estimates across frequency, in normalized frequency units
+ * (cycles/sample), averaged over the slots. This is the same measurement the TA estimator performs: a
+ * timing offset ta rotates the pilots by e^{-j*2pi*15kHz*ta*k}, for which this returns +15kHz*ta.
+ */
+static float
+measure_pilot_slope(srsran_chest_ul_t* q, uint32_t nslots, uint32_t nrefs_sym, bool use_cedron_alg)
+{
+  float fe = 0.0f;
+  for (uint32_t i = 0; i < nslots; i++) {
+    if (use_cedron_alg) {
+      fe += srsran_cedron_freq_estimate(&q->srsran_cedron_freq_est, &q->pilot_estimates[i * nrefs_sym], nrefs_sym) /
+            nslots;
+    } else {
+      fe += srsran_vec_estimate_frequency(&q->pilot_estimates[i * nrefs_sym], nrefs_sym) / nslots;
+    }
+  }
+  return fe;
+}
+
+/// Converts a pilot phase slope (normalized frequency, cycles/sample) to a time alignment error in
+/// micro-seconds, rounded to one tenth of micro-second (same conversion the legacy TA path applies)
+static float pilot_slope_to_ta_us(float fe, uint32_t stride)
+{
+  if (!isnormal(fe) || stride == 0) {
+    return 0.0f;
+  }
+  fe /= (float)stride; // Divide by the pilot spacing
+  fe /= 15e3f;         // Convert from normalized frequency to seconds
+  fe *= 1e6f;          // Convert to micro-seconds
+  return roundf(fe * 10.0f) / 10.0f;
+}
 
 /* Uses the difference between the averaged and non-averaged pilot estimates */
 static float estimate_noise_pilots(srsran_chest_ul_t*     q,
@@ -421,27 +456,9 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
     res->cfo_hz = NAN;
   }
 
-  // Calculate time alignment error
-  float ta_err = 0.0f;
+  // Calculate time alignment error in micro-seconds
   if (meas_ta_en) {
-    for (int i = 0; i < nslots; i++) {
-      if (use_cedron_alg) {
-        ta_err +=
-            srsran_cedron_freq_estimate(&q->srsran_cedron_freq_est, &q->pilot_estimates[i * nrefs_sym], nrefs_sym) /
-            nslots;
-      } else {
-        ta_err += srsran_vec_estimate_frequency(&q->pilot_estimates[i * nrefs_sym], nrefs_sym) / nslots;
-      }
-    }
-  }
-
-  // Calculate actual time alignment error in micro-seconds
-  if (isnormal(ta_err) && stride > 0) {
-    ta_err /= (float)stride;                     // Divide by the pilot spacing
-    ta_err /= 15e3f;                             // Convert from normalized frequency to seconds
-    ta_err *= 1e6f;                              // Convert to micro-seconds
-    ta_err     = roundf(ta_err * 10.0f) / 10.0f; // Round to one tenth of micro-second
-    res->ta_us = ta_err;
+    res->ta_us = pilot_slope_to_ta_us(measure_pilot_slope(q, nslots, nrefs_sym, use_cedron_alg), stride);
   } else {
     res->ta_us = 0.0f;
   }
@@ -469,6 +486,17 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
             nrefs_sym);
       }
       res->noise_estimate = 0;
+    }
+
+    // Re-apply the timing-offset slope that was removed from the pilots, so the estimates carry the true
+    // channel phase. Must run after the noise residual (which is computed in the flattened domain, where
+    // it matches the modeled filter bias) and before any time-domain processing.
+    if (proc->derot_cfo != 0.0f) {
+      for (uint32_t i = 0; i < nslots; i++) {
+        cf_t* row =
+            &res->ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE];
+        srsran_vec_apply_cfo(row, -proc->derot_cfo, row, nrefs_sym);
+      }
     }
 
     if (write_estimates) {
@@ -564,12 +592,38 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                            q->pilot_estimates,
                            nrefs_sf);
 
-  // Select the frequency-domain smoothing for this grant. PUCCH and SRS keep the shared legacy filter.
   chest_ul_proc_t proc = {
       .filter      = q->smooth_filter,
       .filter_len  = q->smooth_filter_len,
       .trunc_edges = false,
   };
+
+  // Measure and remove the pilot phase slope (i.e. the timing offset) before any frequency-domain
+  // processing: a residual timing error rotates the pilots by e^{-j*2pi*15kHz*ta*k}, which smoothing
+  // filters average across (biasing the estimates low, worst for the long low-SNR filters on
+  // pre-TA-convergence grants such as msg3) and which inflates the second-difference SNR pre-estimate.
+  // De-rotation is unitary, so the noise statistics and the modeled filter bias are unchanged; the slope
+  // is re-applied to the smoothed estimates inside chest_ul_estimate.
+  bool  meas_ta_en = cfg->meas_ta_en;
+  float derot_ta_us = 0.0f;
+  if (q->pusch_opts.ta_derotation) {
+    float fe = measure_pilot_slope(q, SRSRAN_NOF_SLOTS_PER_SF, nrefs_sym, cfg->use_cedron_alg);
+    if (isnormal(fe)) {
+      // Pilots carry e^{-j*2pi*fe*k}: multiply by the conjugate ramp (srsran_vec_apply_cfo applies
+      // e^{+j*2pi*cfo*n}). The slope is common to both slots - even under hopping only the constant
+      // phase offset differs, and that folds into the per-slot channel estimate.
+      for (uint32_t i = 0; i < SRSRAN_NOF_SLOTS_PER_SF; i++) {
+        srsran_vec_apply_cfo(&q->pilot_estimates[i * nrefs_sym], fe, &q->pilot_estimates[i * nrefs_sym], nrefs_sym);
+      }
+      proc.derot_cfo = fe;
+      // The measured slope IS the time alignment error; the flattened pilots would measure ~0, so take
+      // over the TA measurement from chest_ul_estimate
+      derot_ta_us = pilot_slope_to_ta_us(fe, 1);
+      meas_ta_en  = false;
+    }
+  }
+
+  // Select the frequency-domain smoothing for this grant. PUCCH and SRS keep the shared legacy filter.
   if (q->pusch_opts.adaptive_smoothing || q->pusch_opts.cross_slot_avg) {
     pusch_select_filter(q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF);
     if (q->pusch_opts.adaptive_smoothing) {
@@ -593,12 +647,17 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                     SRSRAN_NOF_SLOTS_PER_SF,
                     nrefs_sym,
                     1,
-                    cfg->meas_ta_en,
+                    meas_ta_en,
                     cfg->use_cedron_alg,
                     true,
                     cfg->grant.n_prb_tilde,
                     &proc,
                     res);
+
+  // TA measured by the de-rotation stage (chest_ul_estimate saw already-flattened pilots)
+  if (cfg->meas_ta_en && proc.derot_cfo != 0.0f) {
+    res->ta_us = derot_ta_us;
+  }
 
   return 0;
 }

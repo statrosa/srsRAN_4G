@@ -48,6 +48,7 @@ static bool     intra_sf_hop     = false;    // slot 1 at a different PRB offset
 static uint32_t nof_sf           = 100;      // subframes to average metrics over
 static bool     selective_chan   = false;    // frequency-selective, time-varying channel
 static float    cfo_hz           = 0.0f;     // carrier frequency offset emulated per symbol
+static float    timing_off_us    = 0.0f;     // timing offset emulated as a phase ramp across frequency
 static float    max_nmse         = INFINITY; // pass threshold: CE MSE / N0 (or /avg|h|^2 without noise)
 static float    max_noise_err_db = INFINITY; // pass threshold: |noise estimate error| in dB
 
@@ -66,6 +67,7 @@ void usage(char* prog)
   printf("\t-N nof_subframes to average metrics over (quality mode) [Default %d]\n", nof_sf);
   printf("\t-S frequency-selective time-varying channel (quality mode) [Default flat]\n");
   printf("\t-f cfo_hz: emulate CFO (quality mode) [Default 0]\n");
+  printf("\t-t to_us: emulate timing offset in micro-seconds (quality mode) [Default 0]\n");
   printf("\t-M max CE NMSE (linear, vs N0 with noise, vs channel power without) [Default no check]\n");
   printf("\t-E max noise estimate error in dB (quality mode) [Default no check]\n");
 
@@ -76,7 +78,7 @@ void usage(char* prog)
 void parse_args(int argc, char** argv)
 {
   int opt;
-  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:M:E:v")) != -1) {
+  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:t:M:E:v")) != -1) {
     switch (opt) {
       case 'r':
         cell.nof_prb = (uint32_t)strtol(optarg, NULL, 10);
@@ -104,6 +106,9 @@ void parse_args(int argc, char** argv)
         break;
       case 'f':
         cfo_hz = strtof(optarg, NULL);
+        break;
+      case 't':
+        timing_off_us = strtof(optarg, NULL);
         break;
       case 'M':
         max_nmse = strtof(optarg, NULL);
@@ -140,6 +145,10 @@ static cf_t channel_gain(uint32_t l, uint32_t k, float sf_phase)
     // One subframe (1 ms) spans 2*nsymb symbols; approximate each symbol as equally spaced in time
     float t = (float)l * 1e-3f / (2.0f * SRSRAN_CP_NSYMB(cell.cp));
     h *= cexpf(I * 2.0f * M_PI * cfo_hz * t);
+  }
+  if (timing_off_us != 0.0f) {
+    // A propagation delay of to_us rotates subcarrier k by e^{-j*2pi*15kHz*to*k} (late UE, positive TA)
+    h *= cexpf(-I * 2.0f * M_PI * 15e3f * timing_off_us * 1e-6f * (float)k);
   }
   return h;
 }
@@ -198,6 +207,7 @@ static int run_quality_mode(void)
 
   srsran_pusch_cfg_t cfg;
   ZERO_OBJECT(cfg);
+  cfg.meas_ta_en   = true;
   cfg.grant.L_prb  = L_prb;
   cfg.grant.n_dmrs = 0;
   // Pre-hopping position is PRB 0 for both slots; with intra-subframe hopping the second slot actually
@@ -213,6 +223,7 @@ static int run_quality_mode(void)
   double sig_pow_acc   = 0.0;
   double noise_est_acc = 0.0;
   double n0_acc        = 0.0;
+  double ta_acc        = 0.0;
   uint64_t mse_count   = 0;
   bool   cfo_valid_seen = false;
 
@@ -287,6 +298,7 @@ static int run_quality_mode(void)
     sig_pow_acc += sig_pow;
     noise_est_acc += res.noise_estimate;
     n0_acc += n0;
+    ta_acc += res.ta_us;
     if (!isnan(res.cfo_hz)) {
       cfo_valid_seen = true;
     }
@@ -301,12 +313,15 @@ static int run_quality_mode(void)
   float nmse         = isnan(snr_db) ? (mse / sig_pow) : (mse / n0);
   float noise_err_db = 10.0f * log10f(noise_est / n0);
 
-  printf("L_prb=%d snr_db=%.1f hop=%d selective=%d cfo=%.0f nof_sf=%d\n",
+  float ta_avg = (float)(ta_acc / nof_sf);
+
+  printf("L_prb=%d snr_db=%.1f hop=%d selective=%d cfo=%.0f to_us=%.1f nof_sf=%d\n",
          L_prb,
          snr_db,
          intra_sf_hop,
          selective_chan,
          cfo_hz,
+         timing_off_us,
          nof_sf);
   printf("  CE MSE: %.6f, NMSE: %.4f (%.2f dB)%s\n",
          mse,
@@ -316,6 +331,9 @@ static int run_quality_mode(void)
   if (!isnan(snr_db)) {
     printf("  Noise: true %.6f, estimated %.6f, error %+.2f dB\n", n0, noise_est, noise_err_db);
   }
+  if (timing_off_us != 0.0f) {
+    printf("  TA: true %.2f us, estimated %.2f us\n", timing_off_us, ta_avg);
+  }
 
   if (nmse > max_nmse) {
     ERROR("CE NMSE %.4f exceeds threshold %.4f", nmse, max_nmse);
@@ -323,6 +341,11 @@ static int run_quality_mode(void)
   }
   if (!isnan(snr_db) && fabsf(noise_err_db) > max_noise_err_db) {
     ERROR("Noise estimate error %.2f dB exceeds threshold %.2f dB", noise_err_db, max_noise_err_db);
+    goto quality_exit;
+  }
+  // With a timing-offset stimulus the reported TA must match it
+  if (timing_off_us != 0.0f && fabsf(ta_avg - timing_off_us) > 0.2f) {
+    ERROR("TA estimate %.2f us deviates from the true %.2f us offset", ta_avg, timing_off_us);
     goto quality_exit;
   }
   // The cross-slot CFO estimate is meaningless when the two slots sit at different frequencies; the

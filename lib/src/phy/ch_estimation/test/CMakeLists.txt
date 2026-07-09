@@ -67,6 +67,12 @@ add_lte_test(chest_test_ul_quality_nonoise chest_test_ul -r 50 -L 2 -N 20 -M 0.0
 # cross-slot CFO estimate flagged invalid
 add_lte_test(chest_test_ul_quality_hop chest_test_ul -r 50 -L 4 -H -N 20 -M 0.0001)
 add_lte_test(chest_test_ul_quality_hop_snr10 chest_test_ul -r 50 -L 4 -H -s 10 -N 200 -M 0.32 -E 0.5)
+# Timing offset (-t, micro-seconds): without TA de-rotation the pilot phase ramp biases the smoothed
+# estimates and the noise estimate (at 4 us / 20 dB the CE gets worse than raw LS and the noise estimate
+# +3.4 dB). Every -t case also asserts the reported ta_us within 0.2 us of the stimulus.
+add_lte_test(chest_test_ul_quality_to4_prb4_snr0 chest_test_ul -r 50 -L 4 -s 0 -t 4.0 -N 200 -M 0.13 -E 0.5)
+add_lte_test(chest_test_ul_quality_to3_prb1_snr20 chest_test_ul -r 50 -L 1 -s 20 -t 3.0 -N 200 -M 0.55 -E 1.0)
+add_lte_test(chest_test_ul_quality_to1_nonoise chest_test_ul -r 50 -L 2 -t 1.0 -N 20 -M 0.0001)
 # Frequency-selective channel at high SNR: regression guard against over-smoothing
 add_lte_test(chest_test_ul_quality_selective chest_test_ul -r 50 -L 6 -s 30 -S -N 200 -M 95)
 
