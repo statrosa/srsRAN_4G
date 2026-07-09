@@ -227,7 +227,10 @@ static float estimate_noise_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nslo
   }
 }
 
-// The interpolator currently only supports same frequency allocation for each subframe
+// The interpolator currently only supports same frequency allocation for each subframe: cesymb() indexes
+// the grid by n_prb[0] only, so the disabled DO_LINEAR_INTERPOLATION block below would read/write the
+// wrong REs whenever the two slots hop to different PRBs. It must stay disabled unless made per-slot.
+// The copy fallback below is per-slot correct.
 #define cesymb(i) ce[SRSRAN_RE_IDX(q->cell.nof_prb, i, n_prb[0] * SRSRAN_NRE)]
 static void interpolate_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nslots, uint32_t nrefs, uint32_t n_prb[2])
 {
@@ -339,9 +342,11 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
     res->ta_us = 0.0f;
   }
 
-  // Check if intra-subframe frequency hopping is enabled
-  if (n_prb[0] != n_prb[1]) {
-    ERROR("ERROR: intra-subframe frequency hopping not supported in the estimator!!");
+  // With intra-subframe frequency hopping the two slots sit at different PRBs, so the cross-slot pilot
+  // phase measured above contains the channel difference between both frequency blocks and is not a CFO
+  bool hopping = (nslots == 2) && (n_prb[0] != n_prb[1]);
+  if (hopping) {
+    res->cfo_hz = NAN;
   }
 
   if (res->ce != NULL) {
@@ -425,9 +430,17 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                            q->pilot_estimates,
                            nrefs_sf);
 
-  // Estimate
-  chest_ul_estimate(
-      q, SRSRAN_NOF_SLOTS_PER_SF, nrefs_sym, 1, cfg->meas_ta_en, cfg->use_cedron_alg, true, cfg->grant.n_prb, res);
+  // Estimate. Use the post-hopping PRB positions (n_prb_tilde): DMRS extraction above and the PUSCH
+  // decoder both index the grid by them, and they differ from n_prb when PUSCH frequency hopping is active
+  chest_ul_estimate(q,
+                    SRSRAN_NOF_SLOTS_PER_SF,
+                    nrefs_sym,
+                    1,
+                    cfg->meas_ta_en,
+                    cfg->use_cedron_alg,
+                    true,
+                    cfg->grant.n_prb_tilde,
+                    res);
 
   return 0;
 }
