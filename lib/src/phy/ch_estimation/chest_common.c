@@ -59,6 +59,99 @@ float srsran_chest_estimate_noise_pilots(cf_t* noisy, cf_t* noiseless, cf_t* noi
   return power;
 }
 
+float srsran_chest_estimate_noise_bias(const float* filter, uint32_t filter_len, uint32_t nrefs, bool extrapolate_edges)
+{
+  uint32_t M = filter_len;
+  uint32_t h = M / 2;
+
+  if (M == 0 || nrefs == 0) {
+    return 1.0f;
+  }
+
+  // Interior outputs see the full filter centered on the output sample: the residual weight vector is
+  // (filter - unit impulse) and its squared norm is the residual-to-noise ratio for white noise
+  double bias_interior = 0.0;
+  for (uint32_t m = 0; m < M; m++) {
+    double w = (double)filter[m] - ((m == h) ? 1.0 : 0.0);
+    bias_interior += w * w;
+  }
+
+  if (nrefs <= 2 * h || M > SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN) {
+    // Fewer samples than the two edge regions is not a supported operating point
+    return (float)bias_interior;
+  }
+
+  double total = (double)(nrefs - 2 * h) * bias_interior;
+
+  // The h outputs at each band edge have different effective weights. Note that with extrapolation the two
+  // edges of srsran_conv_same_cf are NOT mirror images of each other, so both are modeled explicitly.
+
+  // First h outputs: effective weights over input[0 .. i+h]
+  for (uint32_t i = 0; i < h; i++) {
+    double w[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN] = {};
+    double wsum                               = 0.0;
+    for (uint32_t m = 0; m < M; m++) {
+      uint32_t t = i + m;
+      if (t < h) {
+        if (extrapolate_edges) {
+          // srsran_conv_same_cf builds samples beyond the edge as (2+h-t)*input[1] - (1+h-t)*input[0]
+          w[1] += (double)filter[m] * (double)(2 + h - t);
+          w[0] -= (double)filter[m] * (double)(1 + h - t);
+        }
+        // truncated edges drop these taps
+      } else {
+        w[t - h] += (double)filter[m];
+        wsum += (double)filter[m];
+      }
+    }
+    if (!extrapolate_edges && wsum > 0.0) {
+      for (uint32_t j = 0; j <= i + h; j++) {
+        w[j] /= wsum;
+      }
+    }
+    w[i] -= 1.0;
+    for (uint32_t j = 0; j <= i + h; j++) {
+      total += w[j] * w[j];
+    }
+  }
+
+  // Last h outputs: effective weights over the last samples, index o counted backwards from the band edge
+  // (o=0 is the last sample). Output nrefs-h+j sits at o = h-1-j.
+  for (uint32_t j = 0; j < h; j++) {
+    double   w[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN] = {};
+    double   wsum                               = 0.0;
+    uint32_t o_self                             = h - 1 - j;
+    for (uint32_t m = 0; m < M; m++) {
+      uint32_t t = j + m;
+      if (extrapolate_edges) {
+        if (t >= M - 1) {
+          // srsran_conv_same_cf builds samples beyond the edge as (2+t-h)*input[N-1] - (1+t-h)*input[N-2]
+          w[0] += (double)filter[m] * (double)(2 + t - h);
+          w[1] -= (double)filter[m] * (double)(1 + t - h);
+        } else {
+          w[M - 2 - t] += (double)filter[m];
+        }
+      } else {
+        if (m <= o_self + h) {
+          w[o_self + h - m] += (double)filter[m];
+          wsum += (double)filter[m];
+        }
+      }
+    }
+    if (!extrapolate_edges && wsum > 0.0) {
+      for (uint32_t o = 0; o <= o_self + h; o++) {
+        w[o] /= wsum;
+      }
+    }
+    w[o_self] -= 1.0;
+    for (uint32_t o = 0; o <= o_self + h; o++) {
+      total += w[o] * w[o];
+    }
+  }
+
+  return (float)(total / nrefs);
+}
+
 uint32_t srsran_chest_set_smooth_filter3_coeff(float* smooth_filter, float w)
 {
   smooth_filter[0] = w;

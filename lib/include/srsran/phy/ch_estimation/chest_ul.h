@@ -84,6 +84,11 @@ typedef struct {
   uint32_t smooth_filter_len;
   float    smooth_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
 
+  // Cached noise bias of the smoothing operator, recomputed when the filter or allocation width changes
+  float    noise_bias;
+  uint32_t noise_bias_filter_len;
+  uint32_t noise_bias_nrefs;
+
   srsran_interp_linsrsran_vec_t srsran_interp_linvec;
 
   srsran_cedron_freq_est_t srsran_cedron_freq_est;

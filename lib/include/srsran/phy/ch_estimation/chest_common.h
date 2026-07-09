@@ -23,6 +23,7 @@
 #define SRSRAN_CHEST_COMMON_H
 
 #include "srsran/config.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 #define SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN 64
@@ -43,6 +44,22 @@ SRSRAN_API void srsran_chest_average_pilots(cf_t*    input,
 SRSRAN_API uint32_t srsran_chest_set_smooth_filter3_coeff(float* smooth_filter, float w);
 
 SRSRAN_API float srsran_chest_estimate_noise_pilots(cf_t* noisy, cf_t* noiseless, cf_t* noise_vec, uint32_t nof_pilots);
+
+/**
+ * Expected power of the difference between raw pilot estimates and their smoothed version, relative to the
+ * noise power, when the pilots contain white noise and the underlying channel is smooth. Dividing the
+ * measured residual power by this factor yields an unbiased noise estimate for any filter and any number of
+ * pilots, including the band-edge samples where the smoother behaves differently than in the interior.
+ *
+ * @param filter Smoothing filter taps
+ * @param filter_len Number of filter taps (odd)
+ * @param nrefs Number of pilot samples the filter is applied to
+ * @param extrapolate_edges true for srsran_conv_same_cf (linear extrapolation beyond the band edges), false
+ * for truncated-and-renormalized edge taps
+ * @return The bias factor (1.0 if the filter does nothing)
+ */
+SRSRAN_API float
+srsran_chest_estimate_noise_bias(const float* filter, uint32_t filter_len, uint32_t nrefs, bool extrapolate_edges);
 
 SRSRAN_API uint32_t srsran_chest_set_triangle_filter(float* fil, int filter_len);
 

@@ -217,14 +217,20 @@ static float estimate_noise_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nslo
 
   power /= nslots;
 
-  if (q->smooth_filter_len == 3) {
-    // Calibrated for filter length 3
-    float w = q->smooth_filter[0];
-    float a = 7.419 * w * w + 0.1117 * w - 0.005387;
-    return (power / (a * 0.8));
-  } else {
-    return power;
+  // The smoothing filter attenuates part of the noise, so the raw-minus-smoothed residual measures only a
+  // fraction of it. Divide by the exact fraction for this filter and allocation width (band edges
+  // included) to get an unbiased noise estimate.
+  if (q->noise_bias_filter_len != q->smooth_filter_len || q->noise_bias_nrefs != nrefs ||
+      !isnormal(q->noise_bias)) {
+    q->noise_bias            = srsran_chest_estimate_noise_bias(q->smooth_filter, q->smooth_filter_len, nrefs, true);
+    q->noise_bias_filter_len = q->smooth_filter_len;
+    q->noise_bias_nrefs      = nrefs;
   }
+
+  if (isnormal(q->noise_bias)) {
+    return power / q->noise_bias;
+  }
+  return power;
 }
 
 // The interpolator currently only supports same frequency allocation for each subframe: cesymb() indexes
