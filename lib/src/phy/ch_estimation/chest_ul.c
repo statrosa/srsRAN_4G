@@ -93,8 +93,11 @@ int srsran_chest_ul_init(srsran_chest_ul_t* q, uint32_t max_prb)
     q->smooth_filter_len = 3;
     srsran_chest_set_smooth_filter3_coeff(q->smooth_filter, 0.3333);
 
-    q->pusch_adaptive_smoothing = true;
-    q->pusch_cross_slot_avg     = true;
+    q->pusch_opts.adaptive_smoothing = true;
+    q->pusch_opts.cross_slot_avg     = true;
+    q->pusch_opts.ta_derotation      = true;
+    q->pusch_opts.dft_denoise        = true;
+    q->pusch_opts.time_interp        = true;
 
     q->dmrs_signal_configured = false;
 
@@ -206,16 +209,30 @@ void srsran_chest_ul_pregen(srsran_chest_ul_t*                 q,
   }
 }
 
+/**
+ * Per-call description of the frequency- and time-domain processing chest_ul_estimate() applies. The PUSCH
+ * path fills it from srsran_chest_ul_pusch_opts_t and the current grant; PUCCH has its own estimator and
+ * SRS passes the legacy configuration (shared filter, extrapolated edges, everything else off).
+ */
+typedef struct {
+  const float* filter;               // frequency-smoothing filter taps (zero filter_len disables smoothing)
+  uint32_t     filter_len;           // number of filter taps
+  bool         trunc_edges;          // true: truncate+renormalize at band edges; false: linear extrapolation
+  float        cross_slot_max_phase; // cross-slot averaging gate in radians (0 disables)
+} chest_ul_proc_t;
+
 /* Uses the difference between the averaged and non-averaged pilot estimates */
-static float estimate_noise_pilots(srsran_chest_ul_t* q,
-                                   cf_t*              ce,
-                                   uint32_t           nslots,
-                                   uint32_t           nrefs,
-                                   uint32_t           n_prb[2],
-                                   const float*       filter,
-                                   uint32_t           filter_len,
-                                   bool               trunc_edges)
+static float estimate_noise_pilots(srsran_chest_ul_t*     q,
+                                   cf_t*                  ce,
+                                   uint32_t               nslots,
+                                   uint32_t               nrefs,
+                                   uint32_t               n_prb[2],
+                                   const chest_ul_proc_t* proc)
 {
+  const float* filter      = proc->filter;
+  uint32_t     filter_len  = proc->filter_len;
+  bool         trunc_edges = proc->trunc_edges;
+
   float power = 0;
   for (int i = 0; i < nslots; i++) {
     power += srsran_chest_estimate_noise_pilots(
@@ -289,22 +306,20 @@ static void interpolate_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nslots, 
 #endif
 }
 
-static void average_pilots(srsran_chest_ul_t* q,
-                           cf_t*              input,
-                           cf_t*              ce,
-                           uint32_t           nslots,
-                           uint32_t           nrefs,
-                           uint32_t           n_prb[2],
-                           const float*       filter,
-                           uint32_t           filter_len,
-                           bool               trunc_edges)
+static void average_pilots(srsran_chest_ul_t*     q,
+                           cf_t*                  input,
+                           cf_t*                  ce,
+                           uint32_t               nslots,
+                           uint32_t               nrefs,
+                           uint32_t               n_prb[2],
+                           const chest_ul_proc_t* proc)
 {
   for (uint32_t i = 0; i < nslots; i++) {
     cf_t* out = &ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE];
-    if (trunc_edges) {
-      srsran_chest_smooth_pilots_trunc(&input[i * nrefs], out, filter, nrefs, filter_len);
+    if (proc->trunc_edges) {
+      srsran_chest_smooth_pilots_trunc(&input[i * nrefs], out, proc->filter, nrefs, proc->filter_len);
     } else {
-      srsran_chest_average_pilots(&input[i * nrefs], out, (float*)filter, nrefs, 1, filter_len);
+      srsran_chest_average_pilots(&input[i * nrefs], out, (float*)proc->filter, nrefs, 1, proc->filter_len);
     }
   }
 }
@@ -382,12 +397,7 @@ static void pusch_select_filter(srsran_chest_ul_t* q, uint32_t nrefs_sym, uint32
  * @param meas_ta_en enables or disables the Time Alignment error measurement
  * @param write_estimates Write channel estimation in res, (true for DMRS and false for SRS)
  * @param n_prb Resource block start for the grant, set to zero for Sounding Reference Signals
- * @param filter frequency-domain smoothing filter taps (a zero filter_len disables smoothing)
- * @param filter_len number of smoothing filter taps
- * @param trunc_edges band-edge handling: true truncates and renormalizes the filter, false extrapolates
- * @param cross_slot_max_phase phase-aligned averaging of the two DMRS estimates engages when the measured
- * cross-slot phase magnitude stays below this (radians); zero disables it (PUSCH only; ignored for a
- * single slot or under frequency hopping)
+ * @param proc frequency- and time-domain processing descriptor (see chest_ul_proc_t)
  * @param res UL channel estimation result
  */
 static void chest_ul_estimate(srsran_chest_ul_t*     q,
@@ -398,10 +408,7 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
                               bool                   use_cedron_alg,
                               bool                   write_estimates,
                               uint32_t               n_prb[SRSRAN_NOF_SLOTS_PER_SF],
-                              const float*           filter,
-                              uint32_t               filter_len,
-                              bool                   trunc_edges,
-                              float                  cross_slot_max_phase,
+                              const chest_ul_proc_t* proc,
                               srsran_chest_ul_res_t* res)
 {
   // Calculate CFO
@@ -447,13 +454,12 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
   }
 
   if (res->ce != NULL) {
-    if (filter_len > 0) {
-      average_pilots(q, q->pilot_estimates, res->ce, nslots, nrefs_sym, n_prb, filter, filter_len, trunc_edges);
+    if (proc->filter_len > 0) {
+      average_pilots(q, q->pilot_estimates, res->ce, nslots, nrefs_sym, n_prb, proc);
 
       // If averaging, compute noise from difference between received and averaged estimates. Do it before
       // any further processing of the DMRS estimates so the residual matches the modeled filter bias.
-      res->noise_estimate =
-          estimate_noise_pilots(q, res->ce, nslots, nrefs_sym, n_prb, filter, filter_len, trunc_edges);
+      res->noise_estimate = estimate_noise_pilots(q, res->ce, nslots, nrefs_sym, n_prb, proc);
     } else {
       // Copy estimates to CE vector without averaging
       for (int i = 0; i < nslots; i++) {
@@ -471,7 +477,8 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
       // estimation noise for every symbol of the subframe. The cross-slot phase is preserved so each
       // slot keeps its own mean phase.
       bool combined = false;
-      if (cross_slot_max_phase > 0.0f && nslots == 2 && !hopping && fabsf(cross_phase) < cross_slot_max_phase) {
+      if (proc->cross_slot_max_phase > 0.0f && nslots == 2 && !hopping &&
+          fabsf(cross_phase) < proc->cross_slot_max_phase) {
         cf_t* h0 = &res->ce[SRSRAN_REFSIGNAL_UL_L(0, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE +
                             n_prb[0] * SRSRAN_NRE];
         cf_t* h1 = &res->ce[SRSRAN_REFSIGNAL_UL_L(1, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE +
@@ -558,22 +565,23 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                            nrefs_sf);
 
   // Select the frequency-domain smoothing for this grant. PUCCH and SRS keep the shared legacy filter.
-  const float* filter               = q->smooth_filter;
-  uint32_t     filter_len           = q->smooth_filter_len;
-  bool         trunc_edges          = false;
-  float        cross_slot_max_phase = 0.0f;
-  if (q->pusch_adaptive_smoothing || q->pusch_cross_slot_avg) {
+  chest_ul_proc_t proc = {
+      .filter      = q->smooth_filter,
+      .filter_len  = q->smooth_filter_len,
+      .trunc_edges = false,
+  };
+  if (q->pusch_opts.adaptive_smoothing || q->pusch_opts.cross_slot_avg) {
     pusch_select_filter(q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF);
-    if (q->pusch_adaptive_smoothing) {
-      filter      = q->pusch_filter;
-      filter_len  = q->pusch_filter_len;
-      trunc_edges = true;
+    if (q->pusch_opts.adaptive_smoothing) {
+      proc.filter      = q->pusch_filter;
+      proc.filter_len  = q->pusch_filter_len;
+      proc.trunc_edges = true;
     }
     // At high SNR the per-slot estimates are already accurate and time tracking is worth more than the
     // remaining noise reduction
-    if (q->pusch_cross_slot_avg && (q->pusch_snr_prior < PUSCH_SMOOTH_SNR_HIGH)) {
-      float phase_std      = 1.0f / sqrtf((float)nrefs_sym * SRSRAN_MAX(q->pusch_snr_prior, 0.01f));
-      cross_slot_max_phase = SRSRAN_MAX(
+    if (q->pusch_opts.cross_slot_avg && (q->pusch_snr_prior < PUSCH_SMOOTH_SNR_HIGH)) {
+      float phase_std           = 1.0f / sqrtf((float)nrefs_sym * SRSRAN_MAX(q->pusch_snr_prior, 0.01f));
+      proc.cross_slot_max_phase = SRSRAN_MAX(
           PUSCH_CROSS_SLOT_MAX_PHASE_RAD,
           SRSRAN_MIN(PUSCH_CROSS_SLOT_PHASE_CAP_RAD, PUSCH_CROSS_SLOT_PHASE_NSTD * phase_std));
     }
@@ -589,19 +597,15 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                     cfg->use_cedron_alg,
                     true,
                     cfg->grant.n_prb_tilde,
-                    filter,
-                    filter_len,
-                    trunc_edges,
-                    cross_slot_max_phase,
+                    &proc,
                     res);
 
   return 0;
 }
 
-void srsran_chest_ul_set_pusch_opts(srsran_chest_ul_t* q, bool adaptive_smoothing, bool cross_slot_avg)
+void srsran_chest_ul_set_pusch_opts(srsran_chest_ul_t* q, const srsran_chest_ul_pusch_opts_t* opts)
 {
-  q->pusch_adaptive_smoothing = adaptive_smoothing;
-  q->pusch_cross_slot_avg     = cross_slot_avg;
+  q->pusch_opts = *opts;
 }
 
 static float
@@ -811,10 +815,14 @@ int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
   // Compute least squares estimates
   srsran_vec_prod_conj_ccc(q->pilot_recv_signal, known_pilots, q->pilot_estimates, n_srs_re);
 
-  // Estimate
-  uint32_t n_prb[2] = {};
-  chest_ul_estimate(
-      q, 1, n_srs_re, 1, true, false, false, n_prb, q->smooth_filter, q->smooth_filter_len, false, 0.0f, res);
+  // Estimate with the legacy processing: shared filter, extrapolated edges, no PUSCH-only features
+  uint32_t        n_prb[2] = {};
+  chest_ul_proc_t proc     = {
+          .filter      = q->smooth_filter,
+          .filter_len  = q->smooth_filter_len,
+          .trunc_edges = false,
+  };
+  chest_ul_estimate(q, 1, n_srs_re, 1, true, false, false, n_prb, &proc, res);
 
   return SRSRAN_SUCCESS;
 }

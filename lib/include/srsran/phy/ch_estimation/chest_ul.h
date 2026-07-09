@@ -61,6 +61,30 @@ typedef struct SRSRAN_API {
   float    ta_us;
 } srsran_chest_ul_res_t;
 
+/**
+ * PUSCH-specific estimation options, all enabled by default. PUCCH and SRS estimation are unaffected by
+ * every one of them.
+ */
+typedef struct SRSRAN_API {
+  /// Select the frequency-smoothing filter per grant from the allocation width and a per-subframe SNR
+  /// pre-estimate (with truncated band edges) instead of the fixed legacy 3-tap filter
+  bool adaptive_smoothing;
+  /// Average the two DMRS estimates (phase-aligned) when the channel is time-flat, the SNR is low and the
+  /// slots are not frequency hopped
+  bool cross_slot_avg;
+  /// Measure the pilot phase slope (the timing offset) and flatten it before any frequency-domain
+  /// processing, re-applying it to the final estimates. Keeps long smoothing filters unbiased and the SNR
+  /// pre-estimate clean when the UE timing is not yet converged (e.g. msg3)
+  bool ta_derotation;
+  /// For wide grants, replace the FIR smoother with a delay-domain projection onto the bins a within-CP
+  /// channel can occupy: large noise reduction with no penalty on frequency-selective channels
+  bool dft_denoise;
+  /// At high SNR, linearly interpolate/extrapolate the two smoothed slot estimates across the subframe
+  /// symbols (with the cross-slot phase applied as a linear phase ramp in time) instead of holding each
+  /// slot's estimate: tracks moderate CFO/Doppler that the per-slot hold cannot
+  bool time_interp;
+} srsran_chest_ul_pusch_opts_t;
+
 typedef struct {
   srsran_cell_t cell;
 
@@ -84,12 +108,11 @@ typedef struct {
   uint32_t smooth_filter_len;
   float    smooth_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
 
-  // PUSCH-only adaptive smoothing state; PUCCH and SRS keep using smooth_filter
-  bool     pusch_adaptive_smoothing;
-  bool     pusch_cross_slot_avg;
-  float    pusch_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
-  uint32_t pusch_filter_len;
-  float    pusch_snr_prior;
+  // PUSCH-only estimation options and adaptive smoothing state; PUCCH and SRS keep using smooth_filter
+  srsran_chest_ul_pusch_opts_t pusch_opts;
+  float                        pusch_filter[SRSRAN_CHEST_MAX_SMOOTH_FIL_LEN];
+  uint32_t                     pusch_filter_len;
+  float                        pusch_snr_prior;
 
   // Cached noise bias of the smoothing operator, recomputed when the filter or allocation width changes
   float    noise_bias;
@@ -120,15 +143,10 @@ SRSRAN_API void srsran_chest_ul_pregen(srsran_chest_ul_t*                 q,
                                        srsran_refsignal_srs_cfg_t*        srs_cfg);
 
 /**
- * Configures the PUSCH-specific estimation improvements, both enabled by default. PUCCH and SRS estimation
- * are unaffected either way.
- *
- * @param adaptive_smoothing selects the frequency-smoothing filter per grant from allocation width and a
- * per-subframe SNR pre-estimate (with truncated band edges) instead of the fixed legacy 3-tap filter
- * @param cross_slot_avg averages the two DMRS estimates (phase-aligned) when the channel is time-flat and
- * the slots are not frequency hopped
+ * Configures the PUSCH-specific estimation improvements (see srsran_chest_ul_pusch_opts_t; all enabled by
+ * default). PUCCH and SRS estimation are unaffected either way.
  */
-SRSRAN_API void srsran_chest_ul_set_pusch_opts(srsran_chest_ul_t* q, bool adaptive_smoothing, bool cross_slot_avg);
+SRSRAN_API void srsran_chest_ul_set_pusch_opts(srsran_chest_ul_t* q, const srsran_chest_ul_pusch_opts_t* opts);
 
 SRSRAN_API int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                                               srsran_ul_sf_cfg_t*    sf,
