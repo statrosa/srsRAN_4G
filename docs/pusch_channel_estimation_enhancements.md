@@ -364,3 +364,69 @@ Negative controls: reverting the Commit-2 indexing fix must fail
 `pusch_test_chest_hop_type2` and the `-H` chest_test_ul cases; disabling both options
 via `srsran_chest_ul_set_pusch_opts(q, false, false)` must reproduce legacy CE output on
 non-hopped grants.
+
+---
+
+# Follow-up enhancements
+
+A second series of commits adds three more PUSCH-only improvements. The options moved to
+a struct — `srsran_chest_ul_set_pusch_opts(q, &(srsran_chest_ul_pusch_opts_t){...})` —
+with five flags, all default-on: `adaptive_smoothing`, `cross_slot_avg` (the original
+two), plus `ta_derotation`, `dft_denoise` and `time_interp` below. Internally the
+per-call knobs of `chest_ul_estimate()` were collapsed into a `chest_ul_proc_t`
+descriptor. PUCCH and SRS remain bit-exact.
+
+## 7. Timing-offset (TA) de-rotation before smoothing — `ta_derotation`
+
+A residual timing offset τ rotates the LS pilots by `e^(−j2π·15kHz·τ·k)` across
+frequency. The smoothers average across that rotation (biasing the estimate low — at
+τ = 4 µs the 1-PRB 20 dB CE degrades beyond raw LS, NMSE 1.13, and the noise estimate
+reads +3.4 dB high) and the ramp inflates the second-difference SNR prior. The slope is
+measured with the same estimator the TA measurement uses — it *is* the TA — the pilots
+are flattened before any frequency-domain processing, and the ramp is re-applied to the
+smoothed rows after the noise residual is taken. Unitary, so noise statistics and the
+modeled filter bias are unchanged; the TA measurement is taken over from the flattened
+path for free. This removes the msg3-style regression risk (long low-SNR filters on
+coarse PRACH-only timing). Measured at 4 µs / 0 dB / 4 PRB: CE 0.159 → 0.092·N0, noise
+bias +0.43 → +0.05 dB; the `-t` stimulus cases also assert `ta_us` within 0.2 µs.
+
+## 8. Delay-domain denoising for wide grants — `dft_denoise`
+
+For grants ≥ 8 PRB (96 pilots), the LS estimates are projected onto the delay bins a
+physical channel can occupy: unitary DFT → keep bins `|d| ≤ ceil(CP/2·bin rate) + 3` →
+DFT back. The TA de-rotation centers the mean delay at bin 0, which is what makes the
+symmetric half-CP window sufficient. Any within-CP channel passes undistorted at every
+SNR, so unlike the FIR tiers there is no selectivity penalty to protect against; the
+noise gain is the kept-bin fraction (~0.07–0.13). The projection engages only when that
+fraction beats the FIR's squared tap norm, so narrow/flat cases keep the FIR. The noise
+estimate divides the residual by the exact projection fraction `(nrefs−K)/nrefs` — an
+orthogonal projection has no edge effects. Measured: 25 PRB @ 10 dB CE 0.124 → 0.072·N0;
+noiseless case exact; stacks with de-rotation (0.073 with a 3 µs offset).
+
+## 9. Phase-corrected time interpolation at high SNR — `time_interp`
+
+The time processing gains a middle branch between cross-slot averaging (low SNR,
+time-flat) and the per-slot hold: at `snr_prior ≥ ~13 dB` and cross-slot phase
+`|φ| ≤ 1 rad`, every symbol is written as
+`h(t) = [(1−t)·h0 + t·h1·e^(+jφ)]·e^(−jφt)` with `t = (l−L1)/(L2−L1)` — linear
+amplitude interpolation with the phase applied as a linear ramp in time, exact for a
+pure-CFO channel (plain complex interpolation shrinks the magnitude between pilots).
+The ≤ 2.23× noise amplification on the extrapolated edge symbols is cheap at high SNR.
+Measured at 4 PRB / 25 dB with 200 Hz CFO: per-slot hold NMSE 10.5 (phase-error
+dominated) → 0.396, identical to the zero-CFO case; the frequency-selective guards
+also halve (the stimulus varies linearly in time), thresholds tightened accordingly.
+
+## Decision tree after all nine changes
+
+```
+srsran_chest_ul_estimate_pusch()
+  ├─ measure slope → flatten pilots (7)           [ta_derotation]
+  ├─ pusch_select_filter(): SNR prior on clean pilots → FIR tier
+  ├─ wide grant & kept-fraction < Σw²? → delay-domain projection (8)   [dft_denoise]
+  ├─ average_pilots → estimate_noise_pilots (exact bias, FIR or projection)
+  ├─ re-apply slope to the smoothed rows (7)
+  └─ time processing:
+       snr < 13 dB & |φ| in gate  → cross-slot average (5)
+       snr ≥ 13 dB & |φ| ≤ 1 rad  → phase-corrected interpolation (9)  [time_interp]
+       otherwise / hopping / SRS  → per-slot hold
+```

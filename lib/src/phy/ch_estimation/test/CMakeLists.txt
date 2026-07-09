@@ -80,9 +80,15 @@ add_lte_test(chest_test_ul_quality_prb12_snr0 chest_test_ul -r 50 -L 12 -s 0 -N 
 add_lte_test(chest_test_ul_quality_prb25_snr10 chest_test_ul -r 50 -L 25 -s 10 -N 200 -M 0.10 -E 0.5)
 add_lte_test(chest_test_ul_quality_prb25_nonoise chest_test_ul -r 50 -L 25 -N 20 -M 0.0001)
 add_lte_test(chest_test_ul_quality_prb25_to3 chest_test_ul -r 50 -L 25 -s 10 -t 3.0 -N 200 -M 0.10 -E 0.5)
-add_lte_test(chest_test_ul_quality_prb12_selective chest_test_ul -r 50 -L 12 -s 20 -S -N 200 -M 12)
-# Frequency-selective channel at high SNR: regression guard against over-smoothing
-add_lte_test(chest_test_ul_quality_selective chest_test_ul -r 50 -L 6 -s 30 -S -N 200 -M 95)
+add_lte_test(chest_test_ul_quality_prb12_selective chest_test_ul -r 50 -L 12 -s 20 -S -N 200 -M 6)
+# Phase-corrected time interpolation at high SNR: a 200 Hz CFO leaves the per-slot hold with NMSE 10.5
+# (phase-error dominated); interpolating with the cross-slot phase ramp restores the no-CFO quality
+add_lte_test(chest_test_ul_quality_interp_cfo200 chest_test_ul -r 50 -L 4 -s 25 -f 200 -N 200 -M 0.55 -E 0.5)
+add_lte_test(chest_test_ul_quality_interp_nocfo chest_test_ul -r 50 -L 4 -s 25 -N 200 -M 0.55 -E 0.5)
+add_lte_test(chest_test_ul_quality_interp_cfo_to2 chest_test_ul -r 50 -L 4 -s 25 -f 200 -t 2.0 -N 200 -M 0.55 -E 0.5)
+# Frequency-selective channel at high SNR: regression guard against over-smoothing (the time-varying
+# stimulus is also tracked by the high-SNR time interpolation, hence the tight bound)
+add_lte_test(chest_test_ul_quality_selective chest_test_ul -r 50 -L 6 -s 30 -S -N 200 -M 60)
 
 ########################################################################
 # Uplink Sounding Reference Signals Channel Estimation TEST
