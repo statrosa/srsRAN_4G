@@ -50,6 +50,18 @@ add_lte_test(chest_test_ul_cellid0 chest_test_ul -c 0 -r 50)
 add_lte_test(chest_test_ul_cellid1 chest_test_ul -c 1 -r 50)
 add_lte_test(chest_test_ul_cellid2 chest_test_ul -c 2 -r 50)
 
+# Estimation quality on narrow allocations: -M bounds the channel estimate NMSE (relative to N0, raw LS
+# equals 1.0) and -E bounds the noise estimate error in dB
+add_lte_test(chest_test_ul_quality_prb1_snr0 chest_test_ul -r 50 -L 1 -s 0 -N 200 -M 0.70 -E 1.5)
+add_lte_test(chest_test_ul_quality_prb1_snr10 chest_test_ul -r 50 -L 1 -s 10 -N 200 -M 0.70 -E 1.5)
+add_lte_test(chest_test_ul_quality_prb1_snr20 chest_test_ul -r 50 -L 1 -s 20 -N 200 -M 0.70 -E 1.5)
+add_lte_test(chest_test_ul_quality_prb2_snr0 chest_test_ul -r 50 -L 2 -s 0 -N 200 -M 0.55 -E 1.0)
+add_lte_test(chest_test_ul_quality_prb4_snr0 chest_test_ul -r 50 -L 4 -s 0 -N 200 -M 0.50 -E 1.0)
+add_lte_test(chest_test_ul_quality_prb4_snr10 chest_test_ul -r 50 -L 4 -s 10 -N 200 -M 0.50 -E 1.0)
+add_lte_test(chest_test_ul_quality_nonoise chest_test_ul -r 50 -L 2 -N 20 -M 0.0001)
+# Frequency-selective channel at high SNR: regression guard against over-smoothing
+add_lte_test(chest_test_ul_quality_selective chest_test_ul -r 50 -L 6 -s 30 -S -N 200 -M 95)
+
 ########################################################################
 # Uplink Sounding Reference Signals Channel Estimation TEST
 ########################################################################
