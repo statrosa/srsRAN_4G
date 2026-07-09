@@ -485,6 +485,15 @@ add_lte_test(npdsch_npdcch_dci_formatN1_test npdsch_npdcch_file_test -c 0 -s 1 -
 add_executable(pusch_test pusch_test.c)
 target_link_libraries(pusch_test srsran_phy)
 
+# Decode small QPSK grants through the real DMRS channel estimator (frequency-selective channel applied)
+add_lte_test(pusch_test_chest_qpsk_L1 pusch_test -n 50 -L 1 -m 4 -p use_chest 1)
+add_lte_test(pusch_test_chest_qpsk_L2 pusch_test -n 50 -L 2 -m 6 -p use_chest 1)
+add_lte_test(pusch_test_chest_qpsk_L4_snr3 pusch_test -n 50 -L 4 -m 4 -p use_chest 1 -p snr_db 3)
+# Type-1 (fixed-offset) and type-2 (pseudo-random, n_prb_tilde != n_prb) intra-subframe frequency hopping
+add_lte_test(pusch_test_chest_hop_type1_snr5 pusch_test -n 50 -L 4 -m 4 -F 0 -p use_chest 1 -p snr_db 5)
+add_lte_test(pusch_test_chest_hop_type2 pusch_test -n 50 -R 162 -m 10 -F 3 -p use_chest 1)
+add_lte_test(pusch_test_chest_hop_type2_snr5 pusch_test -n 50 -R 162 -m 4 -F 3 -p use_chest 1 -p snr_db 5)
+
 if (${ENABLE_ALL_TEST})
   # All valid number of PRBs for PUSCH
   set(cell_n_prb_valid 1 2 3 4 5 6 8 9 10 12 15 16 18 20 24 25 27 30 32 36 40 45 48 50 54 60 64 72 75 80 81 90 96 100)

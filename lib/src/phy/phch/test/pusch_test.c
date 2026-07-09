@@ -56,6 +56,8 @@ int          freq_hop      = -1;
 int          riv           = -1;
 uint32_t     mcs_idx       = 0;
 bool         enable_64_qam = false;
+bool         use_chest     = false; // decode with real DMRS channel estimation instead of an identity CE
+float        chest_snr_db  = NAN;   // add AWGN at this SNR (requires use_chest)
 
 void usage(char* prog)
 {
@@ -83,6 +85,9 @@ void usage(char* prog)
 
   printf("\n\tOther parameters:\n");
   printf("\t\t-p enable_64qam [Default %s]\n", enable_64_qam ? "enabled" : "disabled");
+  printf("\t\t-p use_chest (any arg): decode with DMRS channel estimation [Default %s]\n",
+         use_chest ? "enabled" : "disabled");
+  printf("\t\t-p snr_db <val>: add AWGN, requires use_chest [Default no noise]\n");
   printf("\t\t-s number of subframes [Default %d]\n", subframe);
   printf("\t-v [set srsran_verbose to debug, default none]\n");
 }
@@ -126,6 +131,10 @@ void parse_extensive_param(char* param, char* arg)
     uci_data_tx.cfg.ack[0].nof_acks = SRSRAN_MIN((uint32_t)strtol(arg, NULL, 10), SRSRAN_UCI_MAX_ACK_BITS);
   } else if (!strcmp(param, "enable_64qam")) {
     enable_64_qam ^= true;
+  } else if (!strcmp(param, "use_chest")) {
+    use_chest = true;
+  } else if (!strcmp(param, "snr_db")) {
+    chest_snr_db = strtof(arg, NULL);
   } else {
     ext_code = SRSRAN_ERROR;
   }
@@ -139,7 +148,7 @@ void parse_extensive_param(char* param, char* arg)
 void parse_args(int argc, char** argv)
 {
   int opt;
-  while ((opt = getopt(argc, argv, "msLFrncpvf")) != -1) {
+  while ((opt = getopt(argc, argv, "msLFrncpvfR")) != -1) {
     switch (opt) {
       case 'm':
         mcs_idx = (uint32_t)strtol(argv[optind], NULL, 10);
@@ -183,6 +192,8 @@ int main(int argc, char** argv)
 {
   srsran_random_t        random_h = srsran_random_init(0);
   srsran_chest_ul_res_t  chest_res  = {};
+  srsran_chest_ul_t      chest      = {};
+  cf_t*                  r_dmrs     = NULL;
   srsran_pusch_t         pusch_tx   = {};
   srsran_pusch_t         pusch_rx   = {};
   uint8_t*               data       = NULL;
@@ -224,8 +235,30 @@ int main(int argc, char** argv)
     return ret;
   }
 
-  cfg.grant.n_prb_tilde[0] = cfg.grant.n_prb[0];
-  cfg.grant.n_prb_tilde[1] = cfg.grant.n_prb[1];
+  if (freq_hop == SRSRAN_RA_PUSCH_HOP_TYPE2) {
+    // Type-2 (intra-subframe) hopping: compute the actual per-slot PRBs, which differ from grant.n_prb
+    srsran_ra_ul_pusch_hopping_t hopping_q = {};
+    if (srsran_ra_ul_pusch_hopping_init(&hopping_q, cell)) {
+      ERROR("Error initializing PUSCH hopping");
+      return ret;
+    }
+    ul_hopping.hopping_enabled = true;
+    ul_hopping.hop_mode        = SRSRAN_PUSCH_HOP_MODE_INTRA_SF;
+    ul_hopping.current_tx_nb   = 0;
+    srsran_ra_ul_pusch_hopping(&hopping_q, &ul_sf, &ul_hopping, &cfg.grant);
+    srsran_ra_ul_pusch_hopping_free(&hopping_q);
+    if (cfg.grant.n_prb_tilde[0] + cfg.grant.L_prb > cell.nof_prb ||
+        cfg.grant.n_prb_tilde[1] + cfg.grant.L_prb > cell.nof_prb) {
+      ERROR("Hopped allocation out of range: n_prb_tilde={%d,%d} L_prb=%d",
+            cfg.grant.n_prb_tilde[0],
+            cfg.grant.n_prb_tilde[1],
+            cfg.grant.L_prb);
+      return ret;
+    }
+  } else {
+    cfg.grant.n_prb_tilde[0] = cfg.grant.n_prb[0];
+    cfg.grant.n_prb_tilde[1] = cfg.grant.n_prb[1];
+  }
 
   if (srsran_pusch_init_ue(&pusch_tx, cell.nof_prb)) {
     ERROR("Error creating PUSCH object");
@@ -280,6 +313,21 @@ int main(int argc, char** argv)
   srsran_chest_ul_res_init(&chest_res, cell.nof_prb);
   srsran_chest_ul_res_set_identity(&chest_res);
 
+  // Real channel estimation from the DMRS the "UE" side inserts, as ue_ul.c/enb_ul.c do
+  srsran_refsignal_dmrs_pusch_cfg_t dmrs_cfg = {};
+  if (use_chest) {
+    if (srsran_chest_ul_init(&chest, cell.nof_prb) || srsran_chest_ul_set_cell(&chest, cell)) {
+      ERROR("Error initializing UL channel estimator");
+      goto quit;
+    }
+    srsran_chest_ul_pregen(&chest, &dmrs_cfg, NULL);
+    r_dmrs = srsran_vec_cf_malloc(2 * cfg.grant.L_prb * SRSRAN_NRE);
+    if (!r_dmrs) {
+      perror("malloc");
+      goto quit;
+    }
+  }
+
   cfg.enable_64qam     = enable_64_qam;
   uint64_t decode_us   = 0;
   uint64_t decode_bits = 0;
@@ -320,6 +368,35 @@ int main(int argc, char** argv)
       if (srsran_pusch_encode(&pusch_tx, &ul_sf, &cfg, &pdata, sf_symbols)) {
         ERROR("Error encoding TB");
         exit(-1);
+      }
+    }
+
+    if (use_chest) {
+      if (srsran_refsignal_dmrs_pusch_gen(
+              &chest.dmrs_signal, &dmrs_cfg, cfg.grant.L_prb, ul_sf.tti % 10, cfg.grant.n_dmrs, r_dmrs)) {
+        ERROR("Error generating PUSCH DMRS");
+        goto quit;
+      }
+      srsran_refsignal_dmrs_pusch_put(&chest.dmrs_signal, &cfg, r_dmrs, sf_symbols);
+
+      // Apply a smooth frequency-selective channel so decoding depends on the channel estimate being
+      // measured at the right subcarriers (unit average power, phase spanning a full turn over the band)
+      for (uint32_t k = 0; k < SRSRAN_NRE * cell.nof_prb; k++) {
+        float x = (float)k / (SRSRAN_NRE * cell.nof_prb);
+        cf_t  h = (0.8f + 0.4f * x) * cexpf(I * (0.7f + 2.0f * (float)M_PI * x));
+        for (uint32_t l = 0; l < 2 * SRSRAN_CP_NSYMB(cell.cp); l++) {
+          sf_symbols[l * SRSRAN_NRE * cell.nof_prb + k] *= h;
+        }
+      }
+
+      if (!isnan(chest_snr_db)) {
+        // PUSCH and DMRS REs have unit average power
+        srsran_ch_awgn_c(sf_symbols, sf_symbols, srsran_convert_dB_to_power(-chest_snr_db), nof_re);
+      }
+
+      if (srsran_chest_ul_estimate_pusch(&chest, &ul_sf, &cfg, sf_symbols, &chest_res)) {
+        ERROR("Error estimating UL channel");
+        goto quit;
       }
     }
 
@@ -401,6 +478,12 @@ int main(int argc, char** argv)
   printf("Decoded Rate: %f Mbps\n", (double)decode_bits / (double)decode_us);
 quit:
   srsran_chest_ul_res_free(&chest_res);
+  if (use_chest) {
+    srsran_chest_ul_free(&chest);
+  }
+  if (r_dmrs) {
+    free(r_dmrs);
+  }
   srsran_pusch_free(&pusch_tx);
   srsran_pusch_free(&pusch_rx);
   srsran_softbuffer_tx_free(&softbuffer_tx);
