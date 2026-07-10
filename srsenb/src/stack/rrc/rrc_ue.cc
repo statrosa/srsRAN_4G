@@ -455,11 +455,13 @@ void rrc::ue::handle_rrc_con_req(rrc_conn_request_s* msg)
                                     static_cast<unsigned>(procedure_result_code::none),
                                     rnti);
 
-  if (not parent->s1ap->is_mme_connected()) {
-    parent->logger.error("MME isn't connected. Sending Connection Reject");
-    send_connection_reject(procedure_result_code::error_mme_not_connected);
-    return;
-  }
+  // NOTE: The MME-connectivity gate is intentionally removed for MME-less
+  // diagnostic operation. Normally the eNB replies with RRC Connection Reject
+  // when S1AP is not connected to an MME; bypassing it lets the RRC connection
+  // proceed to RRC Connection Setup so the UE transmits Msg5 (RRC Connection
+  // Setup Complete), which is scheduled by a PDCCH format-0 UL grant. The NAS
+  // PDU forwarding in handle_rrc_con_setup_complete() degrades safely
+  // (s1ap::ue::send_initialuemessage() returns early when the MME is absent).
 
   // Allocate PUCCH resources and reject if not available
   if (not init_pucch()) {
