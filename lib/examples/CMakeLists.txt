@@ -84,6 +84,9 @@ if(RF_FOUND)
   add_executable(usrp_capture_sync usrp_capture_sync.c)
   target_link_libraries(usrp_capture_sync srsran_phy srsran_rf)
 
+  add_executable(dl_ul_capture_align dl_ul_capture_align.cc)
+  target_link_libraries(dl_ul_capture_align srsran_phy srsran_common srsran_rf pthread)
+
   add_executable(usrp_capture_sync_nbiot usrp_capture_sync_nbiot.c)
   target_link_libraries(usrp_capture_sync_nbiot srsran_rf srsran_phy)
 
