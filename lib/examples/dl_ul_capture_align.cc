@@ -1000,6 +1000,15 @@ int main(int argc, char** argv)
     }
     ul_file_open = true;
     ul_file_buf.resize(sf_len);
+    // Calibration: advance the UL file by -o samples to line it up with the DL
+    // stream (e.g. two independently-recorded captures with a constant start
+    // offset). Applied once, before the lockstep read loop.
+    if (args.ul_offset_samples > 0) {
+      std::vector<cf_t> skip(args.ul_offset_samples);
+      void*             p = skip.data();
+      srsran_filesource_read_multi(&ul_filesrc, &p, args.ul_offset_samples, 1);
+      printf("Skipped %d UL samples for DL/UL alignment\n", args.ul_offset_samples);
+    }
   } else {
     srsran_rf_start_rx_stream(&dl_rf, false);
     srsran_rf_start_rx_stream(&ul_rf, false);
