@@ -23,7 +23,52 @@
 #include "srsran/phy/rf/rf.h"
 #include "srsran/phy/utils/debug.h"
 #include <dlfcn.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/*
+ * Optional, opt-in IQ tap. When SRSRAN_RF_TX_RECORD_FILE / SRSRAN_RF_RX_RECORD_FILE
+ * are set in the environment, the samples passing through the driver-agnostic
+ * send/recv forwarders (channel 0, at the current/cell sample rate) are appended
+ * to those files as raw interleaved complex float32 (== SRSRAN_COMPLEX_FLOAT_BIN).
+ * This lets an srsENB running over ZMQ record its own transmitted DL and received
+ * UL, perfectly aligned on the eNB's timeline, without inserting anything into the
+ * sample path. When the env vars are unset there is zero overhead beyond a cached
+ * NULL check. Each file has a single writer thread (TX vs RX), so no locking is
+ * needed on the hot path; only the one-time open is guarded.
+ */
+static FILE*           rf_tx_record_file = NULL;
+static FILE*           rf_rx_record_file = NULL;
+static pthread_once_t  rf_record_once    = PTHREAD_ONCE_INIT;
+
+static void rf_record_init(void)
+{
+  const char* txf = getenv("SRSRAN_RF_TX_RECORD_FILE");
+  const char* rxf = getenv("SRSRAN_RF_RX_RECORD_FILE");
+  if (txf != NULL && txf[0] != '\0') {
+    rf_tx_record_file = fopen(txf, "wb");
+    if (rf_tx_record_file != NULL) {
+      setvbuf(rf_tx_record_file, NULL, _IOFBF, 1 << 22);
+    }
+  }
+  if (rxf != NULL && rxf[0] != '\0') {
+    rf_rx_record_file = fopen(rxf, "wb");
+    if (rf_rx_record_file != NULL) {
+      setvbuf(rf_rx_record_file, NULL, _IOFBF, 1 << 22);
+    }
+  }
+}
+
+static inline void rf_record_tap(bool is_tx, void* buf, int nsamples)
+{
+  pthread_once(&rf_record_once, rf_record_init);
+  FILE* f = is_tx ? rf_tx_record_file : rf_rx_record_file;
+  if (f != NULL && buf != NULL && nsamples > 0) {
+    fwrite(buf, 2 * sizeof(float), (size_t)nsamples, f); // one complex float32 sample = 8 B
+  }
+}
 
 int rf_get_available_devices(char** devnames, int max_strlen)
 {
@@ -292,7 +337,10 @@ int srsran_rf_recv_with_time_multi(srsran_rf_t* rf,
                                    time_t*      secs,
                                    double*      frac_secs)
 {
-  return ((rf_dev_t*)rf->dev)->srsran_rf_recv_with_time_multi(rf->handler, data, nsamples, blocking, secs, frac_secs);
+  int ret =
+      ((rf_dev_t*)rf->dev)->srsran_rf_recv_with_time_multi(rf->handler, data, nsamples, blocking, secs, frac_secs);
+  rf_record_tap(false, data != NULL ? data[0] : NULL, ret > 0 ? ret : (int)nsamples);
+  return ret;
 }
 
 int srsran_rf_set_tx_gain(srsran_rf_t* rf, double gain)
@@ -357,6 +405,7 @@ int srsran_rf_send_timed_multi(srsran_rf_t* rf,
                                bool         is_start_of_burst,
                                bool         is_end_of_burst)
 {
+  rf_record_tap(true, data != NULL ? data[0] : NULL, nsamples);
   return ((rf_dev_t*)rf->dev)
       ->srsran_rf_send_timed_multi(
           rf->handler, data, nsamples, secs, frac_secs, true, blocking, is_start_of_burst, is_end_of_burst);
