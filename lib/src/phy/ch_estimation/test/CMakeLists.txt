@@ -86,6 +86,17 @@ add_lte_test(chest_test_ul_quality_prb12_selective chest_test_ul -r 50 -L 12 -s 
 add_lte_test(chest_test_ul_quality_interp_cfo200 chest_test_ul -r 50 -L 4 -s 25 -f 200 -N 200 -M 0.55 -E 0.5)
 add_lte_test(chest_test_ul_quality_interp_nocfo chest_test_ul -r 50 -L 4 -s 25 -N 200 -M 0.55 -E 0.5)
 add_lte_test(chest_test_ul_quality_interp_cfo_to2 chest_test_ul -r 50 -L 4 -s 25 -f 200 -t 2.0 -N 200 -M 0.55 -E 0.5)
+# Coarse/fine timing sweep (-W): rank 10 window candidates (64-sample steps) with
+# srsran_chest_ul_rank_pusch, centered-estimate the winner; offsets far beyond the blind de-rotation
+# range decode at well-timed quality and coarse+residual TA recovers the true offset within 0.2 us
+add_lte_test(chest_test_ul_sweep_to20_snr5 chest_test_ul -r 50 -L 25 -s 5 -t 20 -W -N 100 -M 0.10 -E 0.5)
+add_lte_test(chest_test_ul_sweep_to25_prb8_snr0 chest_test_ul -r 50 -L 8 -s 0 -t 25 -W -N 100 -M 0.13 -E 0.5)
+add_lte_test(chest_test_ul_sweep_to12_nonoise chest_test_ul -r 50 -L 12 -t 12 -W -N 20 -M 0.0001)
+# Centered-window estimate (-w): a correct external center matches auto quality; a center wrong by 5 us
+# trips the energy-capture guard and degrades gracefully to the FIR path (without the guard the
+# projection deletes the channel: NMSE 9.9, noise estimate +10.8 dB)
+add_lte_test(chest_test_ul_center_correct chest_test_ul -r 50 -L 25 -s 10 -t 5.0 -w 5.0 -N 100 -M 0.10 -E 0.5)
+add_lte_test(chest_test_ul_center_guard chest_test_ul -r 50 -L 25 -s 10 -t 5.0 -w 0 -N 100 -M 0.30 -E 1.0)
 # Frequency-selective channel at high SNR: regression guard against over-smoothing (the time-varying
 # stimulus is also tracked by the high-SNR time interpolation, hence the tight bound)
 add_lte_test(chest_test_ul_quality_selective chest_test_ul -r 50 -L 6 -s 30 -S -N 200 -M 60)
