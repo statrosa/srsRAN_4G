@@ -757,6 +757,34 @@ static int srsran_rf_recv_wrapper(void* h, cf_t* data_[SRSRAN_MAX_PORTS], uint32
       (srsran_rf_t*)h, ptr, nsamples, true, t ? &t->full_secs : nullptr, t ? &t->frac_secs : nullptr);
 }
 
+// File-backed recv callback so the DL recording is driven through the SAME
+// PSS/SSS synchroniser as a live radio. This is essential for recordings that
+// are not perfectly frame-aligned or that contain inserted/dropped subframes
+// (e.g. a ZMQ virtual-radio capture, where request-pacing makes the driver
+// gap-fill). The sequential reader (srsran_ue_sync_init_file_multi) assumes a
+// fixed sf_idx and breaks on any such glitch; PSS/SSS re-locks every frame and
+// recovers the correct subframe index from the SSS.
+static bool     g_dl_file_eof     = false;
+static uint64_t g_dl_samples_read = 0; // total DL samples consumed from the file
+static int      dl_file_recv_wrapper(void* h, cf_t* data[SRSRAN_MAX_PORTS], uint32_t nsamples, srsran_timestamp_t* t)
+{
+  srsran_filesource_t* fs = (srsran_filesource_t*)h;
+  int                  n  = srsran_filesource_read(fs, data[0], (int)nsamples);
+  g_dl_samples_read += (n > 0) ? (uint64_t)n : 0;
+  if (n < (int)nsamples) {
+    if (n < 0) {
+      n = 0;
+    }
+    memset(&data[0][n], 0, ((size_t)nsamples - n) * sizeof(cf_t)); // zero-pad tail
+    g_dl_file_eof = true;
+  }
+  if (t) {
+    t->full_secs = 0;
+    t->frac_secs = 0;
+  }
+  return (int)nsamples;
+}
+
 /**********************************************************************
  *  DL processing: detect UL grants and push them to the store
  **********************************************************************/
@@ -781,10 +809,12 @@ static void process_dl_subframe(srsran_ue_dl_t*     ue_dl,
     srsran_dci_dl_t dci_dl[SRSRAN_MAX_DCI_MSG] = {};
     // find_dl_dci runs the blind PDCCH search for this rnti and, as a side effect,
     // stashes the format-0 (UL) DCI candidates for find_ul_dci to unpack.
-    srsran_ue_dl_find_dl_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_dl);
+    int nof_dl = srsran_ue_dl_find_dl_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_dl);
+    (void)nof_dl;
 
     srsran_dci_ul_t dci_ul[SRSRAN_MAX_DCI_MSG] = {};
     int             nof_ul = srsran_ue_dl_find_ul_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_ul);
+    (void)nof_ul;
     for (int i = 0; i < nof_ul; i++) {
       pending_grant_t g = {};
       g.dl_mono         = dl_mono;
@@ -859,7 +889,18 @@ int main(int argc, char** argv)
     cell.nof_ports       = args.file_nof_ports;
     cell.nof_prb         = args.file_nof_prb;
 
-    if (srsran_ue_sync_init_file_multi(&ue_sync, cell.nof_prb, (char*)args.dl_file.c_str(), 0, 0, 1)) {
+    // Drive the DL recording through the real PSS/SSS synchroniser (as a live
+    // radio would), NOT the naive sequential file reader. This recovers the true
+    // frame boundary and per-subframe sf_idx from the SSS every frame, so a
+    // recording that starts off a frame boundary or contains inserted/dropped
+    // subframes (e.g. a request-paced ZMQ capture) is still decoded correctly.
+    static srsran_filesource_t dl_filesrc = {};
+    if (srsran_filesource_init(&dl_filesrc, (char*)args.dl_file.c_str(), SRSRAN_COMPLEX_FLOAT_BIN)) {
+      ERROR("Error opening DL file %s", args.dl_file.c_str());
+      exit(-1);
+    }
+    if (srsran_ue_sync_init_multi_decim(
+            &ue_sync, cell.nof_prb, cell.id == 1000, dl_file_recv_wrapper, 1, (void*)&dl_filesrc, 0)) {
       ERROR("Error initialising DL file ue_sync");
       exit(-1);
     }
@@ -938,13 +979,10 @@ int main(int argc, char** argv)
     ue_sync.cfo_correct_enable_find = true;
   }
 
-  // In file mode srsran_ue_sync_init_file_multi() already configures the cell; a
-  // subsequent set_cell() would fail its "nof_prb lower than initialized" check.
-  if (!file_mode) {
-    if (srsran_ue_sync_set_cell(&ue_sync, cell)) {
-      ERROR("Error setting cell on ue_sync");
-      exit(-1);
-    }
+  // Both modes now use the PSS/SSS-based ue_sync, so the cell must be set.
+  if (srsran_ue_sync_set_cell(&ue_sync, cell)) {
+    ERROR("Error setting cell on ue_sync");
+    exit(-1);
   }
 
   srsran_cell_fprint(stdout, &cell, 0);
@@ -965,7 +1003,20 @@ int main(int argc, char** argv)
   }
   srsran_ue_dl_cfg_t ue_dl_cfg    = {};
   ue_dl_cfg.cfg.tm                = SRSRAN_TM1;
-  ue_dl_cfg.chest_cfg.estimator_alg = SRSRAN_ESTIMATOR_ALG_INTERPOLATE;
+  // Channel-estimator config matching srsue/pdsch_ue. sync_error_enable is the
+  // critical one for replayed captures: it estimates and corrects a residual
+  // per-subframe sample-timing offset from the CRS. Without it, a small timing
+  // offset in a recording (e.g. an eNB TX dump) produces a steep phase ramp
+  // across subcarriers that wrecks the PCFICH/PDCCH channel estimate.
+  ue_dl_cfg.chest_cfg.filter_type    = SRSRAN_CHEST_FILTER_GAUSS;
+  ue_dl_cfg.chest_cfg.estimator_alg  = SRSRAN_ESTIMATOR_ALG_INTERPOLATE;
+  ue_dl_cfg.chest_cfg.noise_alg      = SRSRAN_NOISE_ALG_PSS;
+  ue_dl_cfg.chest_cfg.sync_error_enable = true;
+  // Also monitor the common search space for C-RNTI (as the real UE does on its
+  // primary cell). Early grants - notably the format-0 grant that schedules Msg5
+  // (RRC Connection Setup Complete) - are placed by the eNB in the common SS, so
+  // without this they are never detected.
+  ue_dl_cfg.cfg.dci_common_ss = true;
 
   const uint32_t sf_len     = SRSRAN_SF_LEN_PRB(cell.nof_prb);
   const uint32_t ring_depth = 256; // >> n+4 latency + worker backlog
@@ -1022,16 +1073,14 @@ int main(int argc, char** argv)
   uint64_t dl_mono         = 0; // monotonic subframe counter for file mode
   uint64_t nof_grants_seen = 0;
   uint32_t sfn             = 0;
-  bool     mib_locked      = file_mode; // in file mode we trust the preset cell
+  bool     mib_locked      = false; // both modes lock the frame via PSS/SSS + MIB
   int      processed       = 0;
   srsran_ue_mib_t ue_mib   = {};
-  if (!file_mode) {
-    if (srsran_ue_mib_init(&ue_mib, sf_buffer[0], cell.nof_prb)) {
-      ERROR("Error initialising UE MIB");
-      exit(-1);
-    }
-    srsran_ue_mib_set_cell(&ue_mib, cell);
+  if (srsran_ue_mib_init(&ue_mib, sf_buffer[0], cell.nof_prb)) {
+    ERROR("Error initialising UE MIB");
+    exit(-1);
   }
+  srsran_ue_mib_set_cell(&ue_mib, cell);
 
   while (!go_exit && (args.nof_subframes < 0 || processed < args.nof_subframes)) {
     cf_t* buffers[SRSRAN_MAX_PORTS] = {sf_buffer[0]};
@@ -1039,6 +1088,9 @@ int main(int argc, char** argv)
     if (ret < 0) {
       ERROR("Error in ue_sync");
       break;
+    }
+    if (file_mode && g_dl_file_eof) {
+      break; // reached end of the DL recording (last read was zero-padded)
     }
     if (ret != 1) {
       continue;
@@ -1055,7 +1107,25 @@ int main(int argc, char** argv)
           srsran_pbch_mib_unpack(bch, &cell, &sfn);
           sfn        = (sfn + sfn_offset) % 1024;
           mib_locked = true;
-          printf("Decoded MIB. SFN=%d\n", sfn);
+          // The MIB carries the real PHICH configuration, which the preset cell
+          // may not match. PHICH REGs shift the PDCCH REG->CCE mapping, so ue_dl
+          // must use the MIB-derived cell. srsran_ue_dl_set_cell alone will NOT
+          // rebuild the regs for a phich-only change (it keys on cell id / prb),
+          // so re-initialise ue_dl fully: the free resets nof_prb to 0, which
+          // makes the following set_cell rebuild the PCFICH/PHICH/PDCCH regs.
+          srsran_ue_dl_free(&ue_dl);
+          if (srsran_ue_dl_init(&ue_dl, sf_buffer, cell.nof_prb, 1) || srsran_ue_dl_set_cell(&ue_dl, cell)) {
+            ERROR("Error re-initialising ue_dl after MIB");
+            break;
+          }
+          printf("Decoded MIB. SFN=%d, PHICH=%s %s\n",
+                 sfn,
+                 cell.phich_length == SRSRAN_PHICH_EXT ? "ext" : "norm",
+                 cell.phich_resources == SRSRAN_PHICH_R_1_6
+                     ? "1/6"
+                     : cell.phich_resources == SRSRAN_PHICH_R_1_2
+                           ? "1/2"
+                           : cell.phich_resources == SRSRAN_PHICH_R_2 ? "2" : "1");
         }
       }
       continue;
@@ -1065,8 +1135,18 @@ int main(int argc, char** argv)
 
     // Establish the monotonic subframe index shared with the UL producer.
     if (file_mode) {
-      // Offline: both files are read from sample 0 in lockstep, so the DL loop
-      // counter is the shared index; advance the UL file by one subframe too.
+      // Offline: the DL is PSS/SSS-synced, which consumes a variable number of
+      // subframes during acquisition, so a naive lockstep UL read would be
+      // offset. Instead, read the UL subframe at the SAME file position as the
+      // just-decoded DL subframe: both files were recorded together, so equal
+      // file positions are the same TTI. The just-returned DL subframe occupies
+      // the last sf_len samples read from the DL file.
+      long dl_sf_idx = (long)(g_dl_samples_read / sf_len) - 1;
+      long ul_sf_idx = dl_sf_idx + (long)(args.ul_offset_samples / (int)sf_len);
+      if (ul_sf_idx < 0) {
+        ul_sf_idx = 0;
+      }
+      srsran_filesource_seek(&ul_filesrc, (int)(ul_sf_idx * (long)sf_len * 2 * (long)sizeof(float)));
       void* p = ul_file_buf.data();
       int   r = srsran_filesource_read_multi(&ul_filesrc, &p, (int)sf_len, 1);
       if (r > 0) {
@@ -1112,9 +1192,7 @@ int main(int argc, char** argv)
   workers.clear();
   srsran_ue_dl_free(&ue_dl);
   srsran_ue_sync_free(&ue_sync);
-  if (!file_mode) {
-    srsran_ue_mib_free(&ue_mib);
-  }
+  srsran_ue_mib_free(&ue_mib);
   if (ul_file_open) {
     srsran_filesource_free(&ul_filesrc);
   }
