@@ -25,21 +25,25 @@
  *  Description:  Passive two-radio LTE diagnostic sniffer.
  *
  *                Radio 0 (DL B210) synchronises to a cell, decodes the PDCCH
- *                and detects UL grants (DCI format 0). Radio 1 (UL B210)
- *                continuously captures raw uplink IQ. The two captures are
- *                aligned on a common (PPS-referenced) time base so that, for a
- *                UL grant seen on the DL in subframe n, the corresponding PUSCH
- *                in subframe n+4 (FDD) is located in the UL capture, handed to a
- *                pool of UL decoder workers through a pull API, decoded with the
- *                eNB-side PUSCH receiver, and printed as a time-aligned
- *                DL-grant -> UL-response timeline.
+ *                and detects UL grants. Radio 1 (UL B210) continuously captures
+ *                raw uplink IQ. The two captures are aligned on a common
+ *                (PPS-referenced) time base so that, for a UL grant seen on the
+ *                DL, the corresponding PUSCH is located in the UL capture, handed
+ *                to a pool of UL decoder workers through a pull API, decoded with
+ *                the eNB-side PUSCH receiver, and printed as a time-aligned
+ *                DL-grant -> UL-response timeline. Two grant types are covered:
+ *                  - dynamic DCI format-0 grants (PUSCH at n+4), and
+ *                  - RAR-granted Msg3 (PUSCH at n+6): the RA-RNTI RAR is decoded,
+ *                    each Temporary C-RNTI is learned into an active pool, and
+ *                    the DCI-0 search then runs over that pool - so the tool
+ *                    discovers C-RNTIs from the RACH exchange with no prior list.
  *
  *                An offline file mode (--dl-file / --ul-file) drives the same
  *                pipeline from two IQ recordings for testing without hardware.
  *
  *  NOTE:         This is a diagnostic tool for a network you are authorised to
- *                operate on. srsRAN's DCI search is RNTI-targeted, so the C-RNTI
- *                (or a blind range) must be supplied on the command line.
+ *                operate on. C-RNTIs are learned automatically from RAR; you may
+ *                also seed the search with -r (C-RNTI list) or -b (blind range).
  *****************************************************************************/
 
 #include <atomic>
@@ -49,10 +53,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <set>
 #include <signal.h>
 #include <string>
 #include <vector>
@@ -100,6 +106,7 @@ typedef struct {
   bool                  blind;
   uint16_t              blind_start;
   uint16_t              blind_end;
+  bool                  rar_enable; // decode RA-RNTI RARs -> Msg3 + learn C-RNTIs
 
   // Runtime
   uint32_t nof_workers;
@@ -128,6 +135,7 @@ static void args_default(prog_args_t* a)
   a->blind                 = false;
   a->blind_start           = 0x0001;
   a->blind_end             = 0xffff;
+  a->rar_enable            = true;
   a->nof_workers           = 4;
   a->nof_subframes         = -1;
   a->verbose               = 0;
@@ -155,6 +163,7 @@ static void usage(const char* prog)
   printf("  --ul-file UL IQ recording (SRSRAN_COMPLEX_FLOAT_BIN) for offline mode\n");
   printf("  -c Cell id (file mode)     -p nof_prb (file mode)     -P nof_ports (file mode)\n");
   printf("  -e Use standard LTE sample rates\n");
+  printf("  -R Disable RAR/Msg3 capture and C-RNTI auto-learn (on by default)\n");
   printf("  -v Increase verbosity (repeatable)\n");
 }
 
@@ -195,7 +204,7 @@ static void parse_args(prog_args_t* args, int argc, char** argv)
   int   fargc = (int)filtered.size();
   char** fargv = filtered.data();
   int   opt;
-  while ((opt = getopt(fargc, fargv, "f:F:a:A:k:g:o:r:b:w:d:n:l:c:p:P:evh")) != -1) {
+  while ((opt = getopt(fargc, fargv, "f:F:a:A:k:g:o:r:b:w:d:n:l:c:p:P:eRvh")) != -1) {
     switch (opt) {
       case 'f':
         args->dl_freq = strtod(optarg, nullptr);
@@ -257,6 +266,9 @@ static void parse_args(prog_args_t* args, int argc, char** argv)
       case 'e':
         args->use_standard_lte_rate = true;
         break;
+      case 'R':
+        args->rar_enable = false;
+        break;
       case 'v':
         increase_srsran_verbose_level();
         args->verbose = get_srsran_verbose_level();
@@ -272,8 +284,8 @@ static void parse_args(prog_args_t* args, int argc, char** argv)
   if (args->nof_workers < 1) {
     args->nof_workers = 1;
   }
-  if (args->rntis.empty() && !args->blind) {
-    fprintf(stderr, "Error: at least one -r RNTI or a -b blind range is required.\n\n");
+  if (args->rntis.empty() && !args->blind && !args->rar_enable) {
+    fprintf(stderr, "Error: need at least one of -r RNTI, -b blind range, or RAR auto-learn.\n\n");
     usage(fargv[0]);
     exit(-1);
   }
@@ -319,9 +331,41 @@ struct timeline_record_t {
   uint32_t L_prb;
   uint32_t rb_start;
   bool     crc;
+  bool     is_msg3; // RAR-granted Msg3 (vs a dynamic DCI-0 grant)
   float    snr_db;
   float    ul_present; // 1 if the UL subframe was available, 0 if missed
   double   decode_ms;
+};
+
+/**********************************************************************
+ *  crnti_pool: the live set of C-RNTIs the DCI-0 search runs over.
+ *  Seeded from the CLI and grown at run time by RAR contention
+ *  resolution (each RAR carries a Temporary C-RNTI). Thread-safe: the
+ *  DL thread both reads (per-subframe snapshot) and writes (on RAR).
+ **********************************************************************/
+class crnti_pool
+{
+public:
+  // Returns true if the RNTI was newly added.
+  bool add(uint16_t rnti)
+  {
+    std::lock_guard<std::mutex> lock(mtx);
+    return rntis.insert(rnti).second;
+  }
+  std::vector<uint16_t> snapshot()
+  {
+    std::lock_guard<std::mutex> lock(mtx);
+    return std::vector<uint16_t>(rntis.begin(), rntis.end());
+  }
+  size_t size()
+  {
+    std::lock_guard<std::mutex> lock(mtx);
+    return rntis.size();
+  }
+
+private:
+  std::mutex            mtx;
+  std::set<uint16_t> rntis;
 };
 
 /**********************************************************************
@@ -333,6 +377,7 @@ struct pending_grant_t {
   uint64_t        ul_mono;
   uint32_t        ul_tti;
   uint16_t        rnti;
+  bool            is_msg3; // RAR-granted Msg3 (n+6) vs dynamic DCI-0 grant (n+4)
   srsran_dci_ul_t dci;
 };
 
@@ -503,18 +548,21 @@ public:
 private:
   void print_one(const timeline_record_t& r)
   {
+    const char* kind = r.is_msg3 ? "Msg3" : "dyn ";
     if (!r.ul_present) {
-      printf("DL#%-5u grant rnti=0x%04x mcs=%2u L_prb=%2u rb_start=%2u  ->  UL#%-5u  [UL subframe missed]\n",
+      printf("DL#%-5u %s rnti=0x%04x mcs=%2u L_prb=%2u rb_start=%2u  ->  UL#%-5u  [UL subframe missed]\n",
              r.dl_tti,
+             kind,
              r.rnti,
              r.mcs,
              r.L_prb,
              r.rb_start,
              r.ul_tti);
     } else {
-      printf("DL#%-5u grant rnti=0x%04x mcs=%2u L_prb=%2u rb_start=%2u  ->  UL#%-5u  CRC=%-3s tbs=%5db snr=%5.1fdB "
+      printf("DL#%-5u %s rnti=0x%04x mcs=%2u L_prb=%2u rb_start=%2u  ->  UL#%-5u  CRC=%-3s tbs=%5db snr=%5.1fdB "
              "(decode %.2fms)\n",
              r.dl_tti,
+             kind,
              r.rnti,
              r.mcs,
              r.L_prb,
@@ -611,6 +659,7 @@ protected:
       rec.ul_tti            = work.grant.ul_tti;
       rec.rnti              = work.grant.rnti;
       rec.mcs               = work.grant.dci.tb.mcs_idx;
+      rec.is_msg3           = work.grant.is_msg3;
 
       if (!work.iq_valid) {
         rec.ul_present = 0.0f;
@@ -785,6 +834,72 @@ static int      dl_file_recv_wrapper(void* h, cf_t* data[SRSRAN_MAX_PORTS], uint
   return (int)nsamples;
 }
 
+// FDD: a RAR-granted Msg3 PUSCH is transmitted 6 subframes after the RAR
+// (FDD_HARQ_DELAY_DL_MS + MSG3_DELAY_MS = 4 + 2; verified against the eNB
+// scheduler: RAR DL tti n -> Msg3 UL tti n+6).
+#define MSG3_UL_DELAY_MS (FDD_HARQ_DELAY_DL_MS + MSG3_DELAY_MS)
+
+// Per-DL-thread RAR PDSCH decode state (single thread, no lock needed).
+struct rar_decoder_t {
+  srsran_softbuffer_rx_t softbuffer = {};
+  uint8_t*               data       = nullptr;
+  bool                   ok         = false;
+};
+
+// Parse a decoded RAR MAC PDU: learn each Temporary C-RNTI into the pool and
+// schedule the corresponding Msg3 PUSCH. The RAR PDU groups all E/T/RAPID
+// subheaders at the front, followed by one 6-byte RAR entry per RAPID subheader
+// (TS 36.321 6.1.5 / 6.2.3): oct0=R|TA[10:4], oct1=TA[3:0]|GRANT[19:16],
+// oct2=GRANT[15:8], oct3=GRANT[7:0], oct4-5=Temp C-RNTI.
+static int parse_rar_pdu(const uint8_t*    buf,
+                         int               len,
+                         srsran_cell_t*    cell,
+                         crnti_pool*       pool,
+                         const std::function<void(uint16_t, const srsran_dci_ul_t&)>& sched_msg3)
+{
+  const uint8_t* p       = buf;
+  const uint8_t* end     = buf + len;
+  int            rapids  = 0;
+  while (p < end) {
+    uint8_t sh = *p++;
+    bool    e  = sh & 0x80;
+    bool    t  = sh & 0x40; // 1 = RAPID subheader, 0 = backoff (no RAR entry)
+    if (t) {
+      rapids++;
+    }
+    if (!e) {
+      break;
+    }
+  }
+  int handled = 0;
+  for (int i = 0; i < rapids && p + 6 <= end; i++) {
+    const uint8_t* e          = p;
+    p += 6;
+    uint16_t       temp_crnti = (uint16_t)((e[4] << 8) | e[5]);
+    uint32_t       grant20    = (uint32_t)(((e[1] & 0x0f) << 16) | (e[2] << 8) | e[3]);
+
+    uint8_t bits[SRSRAN_RAR_GRANT_LEN];
+    for (int b = 0; b < SRSRAN_RAR_GRANT_LEN; b++) {
+      bits[b] = (grant20 >> (SRSRAN_RAR_GRANT_LEN - 1 - b)) & 0x1;
+    }
+    srsran_dci_rar_grant_t rar_grant = {};
+    srsran_dci_rar_unpack(bits, &rar_grant);
+
+    srsran_dci_ul_t dci_ul = {};
+    if (srsran_dci_rar_to_ul_dci(cell, &rar_grant, &dci_ul)) {
+      continue;
+    }
+    dci_ul.rnti = temp_crnti;
+
+    if (pool->add(temp_crnti)) {
+      printf("Learned C-RNTI 0x%04x from RAR contention resolution\n", temp_crnti);
+    }
+    sched_msg3(temp_crnti, dci_ul);
+    handled++;
+  }
+  return handled;
+}
+
 /**********************************************************************
  *  DL processing: detect UL grants and push them to the store
  **********************************************************************/
@@ -795,6 +910,8 @@ static void process_dl_subframe(srsran_ue_dl_t*     ue_dl,
                                 uint32_t            tti,
                                 uint64_t            dl_mono,
                                 ul_capture_store*   store,
+                                crnti_pool*         pool,
+                                rar_decoder_t*      rar,
                                 uint64_t*           nof_grants_seen)
 {
   srsran_dl_sf_cfg_t dl_sf = {};
@@ -805,36 +922,71 @@ static void process_dl_subframe(srsran_ue_dl_t*     ue_dl,
     return;
   }
 
-  auto search_rnti = [&](uint16_t rnti) {
+  // Enqueue a UL grant (delay = n+4 for a dynamic DCI-0, n+6 for Msg3).
+  auto push_ul = [&](uint16_t rnti, const srsran_dci_ul_t& dci, uint32_t delay, bool is_msg3) {
+    pending_grant_t g = {};
+    g.dl_mono         = dl_mono;
+    g.dl_tti          = tti;
+    g.ul_mono         = dl_mono + delay;
+    g.ul_tti          = TTI_ADD(tti, delay);
+    g.rnti            = rnti;
+    g.is_msg3         = is_msg3;
+    g.dci             = dci;
+    store->push_grant(g);
+    (*nof_grants_seen)++;
+  };
+
+  // --- RAR path: RA-RNTI PDCCH -> RAR PDSCH -> MAC RAR -> Msg3 + learn C-RNTI.
+  if (args.rar_enable && rar->ok) {
+    for (uint16_t ra = SRSRAN_RARNTI_START; ra <= SRSRAN_RARNTI_END; ra++) {
+      srsran_dci_dl_t dci_dl[SRSRAN_MAX_DCI_MSG] = {};
+      int             nof = srsran_ue_dl_find_dl_dci(ue_dl, &dl_sf, ue_dl_cfg, ra, dci_dl);
+      for (int i = 0; i < nof; i++) {
+        srsran_pdsch_grant_t grant = {};
+        if (srsran_ue_dl_dci_to_pdsch_grant(ue_dl, &dl_sf, ue_dl_cfg, &dci_dl[i], &grant)) {
+          continue;
+        }
+        srsran_pdsch_cfg_t pcfg = {};
+        pcfg.grant              = grant;
+        pcfg.rnti               = ra;
+        pcfg.softbuffers.rx[0]  = &rar->softbuffer;
+        srsran_softbuffer_rx_reset_tbs(&rar->softbuffer, (uint32_t)grant.tb[0].tbs);
+
+        srsran_pdsch_res_t res[SRSRAN_MAX_CODEWORDS] = {};
+        res[0].payload                               = rar->data;
+        if (srsran_ue_dl_decode_pdsch(ue_dl, &dl_sf, &pcfg, res) < 0 || !res[0].crc) {
+          continue;
+        }
+        parse_rar_pdu(rar->data,
+                      grant.tb[0].tbs / 8,
+                      cell,
+                      pool,
+                      [&](uint16_t crnti, const srsran_dci_ul_t& dci) {
+                        push_ul(crnti, dci, MSG3_UL_DELAY_MS, true);
+                      });
+      }
+    }
+  }
+
+  // --- Dynamic path: search every C-RNTI currently in the active pool.
+  auto search_crnti = [&](uint16_t rnti) {
     srsran_dci_dl_t dci_dl[SRSRAN_MAX_DCI_MSG] = {};
     // find_dl_dci runs the blind PDCCH search for this rnti and, as a side effect,
     // stashes the format-0 (UL) DCI candidates for find_ul_dci to unpack.
-    int nof_dl = srsran_ue_dl_find_dl_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_dl);
-    (void)nof_dl;
-
+    srsran_ue_dl_find_dl_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_dl);
     srsran_dci_ul_t dci_ul[SRSRAN_MAX_DCI_MSG] = {};
     int             nof_ul = srsran_ue_dl_find_ul_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_ul);
-    (void)nof_ul;
     for (int i = 0; i < nof_ul; i++) {
-      pending_grant_t g = {};
-      g.dl_mono         = dl_mono;
-      g.dl_tti          = tti;
-      // FDD: a format-0 grant in subframe n schedules PUSCH in subframe n+4.
-      g.ul_mono = dl_mono + FDD_HARQ_DELAY_UL_MS;
-      g.ul_tti  = TTI_ADD(tti, FDD_HARQ_DELAY_UL_MS);
-      g.rnti    = rnti;
-      g.dci     = dci_ul[i];
-      store->push_grant(g);
-      (*nof_grants_seen)++;
+      push_ul(rnti, dci_ul[i], FDD_HARQ_DELAY_UL_MS, false);
     }
   };
 
-  for (uint16_t rnti : args.rntis) {
-    search_rnti(rnti);
+  for (uint16_t rnti : pool->snapshot()) {
+    search_crnti(rnti);
   }
   if (args.blind) {
     for (uint32_t r = args.blind_start; r <= args.blind_end; r++) {
-      search_rnti((uint16_t)r);
+      search_crnti((uint16_t)r);
     }
   }
 }
@@ -1024,6 +1176,26 @@ int main(int argc, char** argv)
   ul_capture_store store(sf_len, ring_depth);
   timeline_printer printer(16);
 
+  // Active C-RNTI pool: seed from the CLI, grow from RAR contention resolution.
+  crnti_pool pool;
+  for (uint16_t r : args.rntis) {
+    pool.add(r);
+  }
+
+  // RAR PDSCH decoder state (used only by the single DL thread).
+  rar_decoder_t rar;
+  if (args.rar_enable) {
+    rar.data = srsran_vec_u8_malloc(0x10000); // >> any single-subframe RAR TBS
+    if (rar.data && srsran_softbuffer_rx_init(&rar.softbuffer, cell.nof_prb) == 0) {
+      rar.ok = true;
+      printf("RAR/Msg3 capture enabled (RA-RNTI 0x%02x..0x%02x); C-RNTI auto-learn on\n",
+             SRSRAN_RARNTI_START,
+             SRSRAN_RARNTI_END);
+    } else {
+      ERROR("Failed to init RAR decoder; RAR/Msg3 capture disabled");
+    }
+  }
+
   // UL decoder worker pool.
   std::vector<std::unique_ptr<ul_decoder_worker>> workers;
   for (uint32_t i = 0; i < args.nof_workers; i++) {
@@ -1160,7 +1332,7 @@ int main(int argc, char** argv)
       dl_mono = sf_mono_from_ts(dl_ts);
     }
 
-    process_dl_subframe(&ue_dl, &ue_dl_cfg, &cell, args, tti, dl_mono, &store, &nof_grants_seen);
+    process_dl_subframe(&ue_dl, &ue_dl_cfg, &cell, args, tti, dl_mono, &store, &pool, &rar, &nof_grants_seen);
 
     if (file_mode) {
       dl_mono++;
@@ -1187,6 +1359,18 @@ int main(int argc, char** argv)
   printf("DL subframes processed : %d\n", processed);
   printf("UL grants detected     : %" PRIu64 "\n", store.get_total_grants());
   printf("UL subframes missed    : %" PRIu64 "\n", store.get_missed_grants());
+  {
+    std::vector<uint16_t> final_pool = pool.snapshot();
+    printf("Active C-RNTIs (%zu)    :", final_pool.size());
+    for (uint16_t r : final_pool) {
+      printf(" 0x%04x", r);
+    }
+    printf("\n");
+  }
+  if (rar.data) {
+    free(rar.data);
+    srsran_softbuffer_rx_free(&rar.softbuffer);
+  }
 
   // Cleanup.
   workers.clear();
