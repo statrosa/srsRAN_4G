@@ -60,7 +60,22 @@ typedef struct SRSRAN_API {
   float    snr_db;
   float    cfo_hz;
   float    ta_us;
+  /// Fraction of pilot energy the delay-domain projection window captured (PUSCH only; NAN when the
+  /// projection was not attempted). Low values mean the energy-capture guard forced the FIR fallback.
+  float delay_energy_frac;
 } srsran_chest_ul_res_t;
+
+/**
+ * Result of ranking one coarse timing hypothesis with srsran_chest_ul_rank_pusch(). Rank candidates by
+ * energy_frac (higher is better); the winner's delay_us is the fine timing to pass as the window center of
+ * srsran_chest_ul_estimate_pusch_win() and to add to the candidate's coarse timing.
+ */
+typedef struct SRSRAN_API {
+  float energy_frac; ///< Pilot energy fraction captured by the best window placement (0..1)
+  float delay_us;    ///< Delay of that window center in micro-seconds (positive = late UE, like ta_us)
+  float epre;        ///< Pilot energy per RE (linear), for absolute cross-candidate comparison
+  bool  reliable;    ///< False when the grant is too narrow (< 2 PRB) for meaningful discrimination
+} srsran_chest_ul_rank_t;
 
 /**
  * PUSCH-specific estimation options, all enabled by default. PUCCH and SRS estimation are unaffected by
@@ -116,10 +131,12 @@ typedef struct {
   float                        pusch_snr_prior;
 
   // Delay-domain denoising transforms for wide PUSCH grants; planned once at the maximum width and
-  // replanned per allocation width
+  // replanned per allocation width. delay_profile is scratch for the delay-power profile used by the
+  // hypothesis ranking and the projection energy-capture guard.
   srsran_dft_plan_t dft_fwd;
   srsran_dft_plan_t dft_bwd;
   uint32_t          dft_size;
+  float*            delay_profile;
 
   // Cached noise bias of the smoothing operator, recomputed when the filter or allocation width changes
   float    noise_bias;
@@ -160,6 +177,37 @@ SRSRAN_API int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                                               srsran_pusch_cfg_t*    cfg,
                                               cf_t*                  input,
                                               srsran_chest_ul_res_t* res);
+
+/**
+ * Ranks one coarse timing hypothesis for a decoder that sweeps the receive FFT window: computes the pilot
+ * delay-power profile (one DFT of the LS estimates per slot, averaged) and searches the placement of the
+ * physical-channel delay window that captures the most energy, constrained to |delay| <= max_delay_us
+ * (<= 0 selects the full unambiguous span of +/-33 us). Cheap: no smoothing, no time processing, no
+ * decode. Deliberately performs NO timing de-rotation, so the metric stays sensitive to the swept
+ * alignment (ranking through the auto-derotating estimator would make all hypotheses look alike).
+ * Call once per candidate alignment; rank by energy_frac; pass the winner's delay_us as window_delay_us of
+ * srsran_chest_ul_estimate_pusch_win(). Uses the same internal scratch as the estimate calls.
+ */
+SRSRAN_API int srsran_chest_ul_rank_pusch(srsran_chest_ul_t*      q,
+                                          srsran_ul_sf_cfg_t*     sf,
+                                          srsran_pusch_cfg_t*     cfg,
+                                          cf_t*                   input,
+                                          float                   max_delay_us,
+                                          srsran_chest_ul_rank_t* rank);
+
+/**
+ * Like srsran_chest_ul_estimate_pusch() but with the delay-domain processing centered at an externally
+ * supplied delay (typically the winning srsran_chest_ul_rank_t.delay_us). The pilots are de-rotated by the
+ * given delay plus a measured residual clamped to +/-2 delay bins, so a corrupted phase-slope measurement
+ * (e.g. under receiver clipping) can only fine-tune within the energy-verified window, never move it.
+ * window_delay_us = NAN selects the automatic behavior of srsran_chest_ul_estimate_pusch().
+ */
+SRSRAN_API int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
+                                                  srsran_ul_sf_cfg_t*    sf,
+                                                  srsran_pusch_cfg_t*    cfg,
+                                                  cf_t*                  input,
+                                                  float                  window_delay_us,
+                                                  srsran_chest_ul_res_t* res);
 
 SRSRAN_API int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
                                               srsran_ul_sf_cfg_t*    sf,

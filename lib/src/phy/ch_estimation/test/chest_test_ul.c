@@ -49,6 +49,14 @@ static uint32_t nof_sf           = 100;      // subframes to average metrics ove
 static bool     selective_chan   = false;    // frequency-selective, time-varying channel
 static float    cfo_hz           = 0.0f;     // carrier frequency offset emulated per symbol
 static float    timing_off_us    = 0.0f;     // timing offset emulated as a phase ramp across frequency
+static float    win_center_us    = NAN;      // explicit window center for the centered-estimate API
+static bool     sweep_mode       = false;    // rank a coarse timing sweep, then centered-estimate the winner
+
+// Coarse sweep emulation: 64-sample FFT-window steps at 15.36 Msps (10 MHz LTE), i.e. the user-style
+// [-64, +512] window expressed in micro-seconds, covering late arrivals up to ~33 us
+#define SWEEP_STEP_US (64.0f / 15.36f)
+#define SWEEP_K_MIN (-1)
+#define SWEEP_K_MAX (8)
 static float    max_nmse         = INFINITY; // pass threshold: CE MSE / N0 (or /avg|h|^2 without noise)
 static float    max_noise_err_db = INFINITY; // pass threshold: |noise estimate error| in dB
 
@@ -68,6 +76,8 @@ void usage(char* prog)
   printf("\t-S frequency-selective time-varying channel (quality mode) [Default flat]\n");
   printf("\t-f cfo_hz: emulate CFO (quality mode) [Default 0]\n");
   printf("\t-t to_us: emulate timing offset in micro-seconds (quality mode) [Default 0]\n");
+  printf("\t-w center_us: use the centered-window estimate API with this center (quality mode)\n");
+  printf("\t-W emulate a coarse timing sweep: rank candidates, centered-estimate the winner\n");
   printf("\t-M max CE NMSE (linear, vs N0 with noise, vs channel power without) [Default no check]\n");
   printf("\t-E max noise estimate error in dB (quality mode) [Default no check]\n");
 
@@ -78,7 +88,7 @@ void usage(char* prog)
 void parse_args(int argc, char** argv)
 {
   int opt;
-  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:t:M:E:v")) != -1) {
+  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:t:w:WM:E:v")) != -1) {
     switch (opt) {
       case 'r':
         cell.nof_prb = (uint32_t)strtol(optarg, NULL, 10);
@@ -109,6 +119,12 @@ void parse_args(int argc, char** argv)
         break;
       case 't':
         timing_off_us = strtof(optarg, NULL);
+        break;
+      case 'w':
+        win_center_us = strtof(optarg, NULL);
+        break;
+      case 'W':
+        sweep_mode = true;
         break;
       case 'M':
         max_nmse = strtof(optarg, NULL);
@@ -155,10 +171,11 @@ static cf_t channel_gain(uint32_t l, uint32_t k, float sf_phase)
 
 static int run_quality_mode(void)
 {
-  int                   ret    = -1;
-  cf_t*                 input  = NULL;
-  cf_t*                 h      = NULL;
-  cf_t*                 r_dmrs = NULL;
+  int                   ret       = -1;
+  cf_t*                 input     = NULL;
+  cf_t*                 h         = NULL;
+  cf_t*                 r_dmrs    = NULL;
+  cf_t*                 grid_cand = NULL; // sweep mode: candidate-compensated copy of the grid
   srsran_chest_ul_t     est    = {};
   srsran_chest_ul_res_t res    = {};
   bool                  chest_initiated = false;
@@ -181,7 +198,10 @@ static int run_quality_mode(void)
   input  = srsran_vec_cf_malloc(sf_len_re);
   h      = srsran_vec_cf_malloc(sf_len_re);
   r_dmrs = srsran_vec_cf_malloc(2 * L_prb * SRSRAN_NRE);
-  if (!input || !h || !r_dmrs) {
+  if (sweep_mode) {
+    grid_cand = srsran_vec_cf_malloc(sf_len_re);
+  }
+  if (!input || !h || !r_dmrs || (sweep_mode && !grid_cand)) {
     perror("srsran_vec_malloc");
     goto quality_exit;
   }
@@ -278,19 +298,67 @@ static int run_quality_mode(void)
       srsran_ch_awgn_c(input, input, n0, sf_len_re);
     }
 
-    // Estimate the channel
-    if (srsran_chest_ul_estimate_pusch(&est, &ul_sf, &cfg, input, &res)) {
+    // Estimate the channel. In sweep mode, first rank the coarse timing candidates like a
+    // window-sweeping decoder would: compensate the grid by each candidate delay, rank it, and run the
+    // centered-window estimate on the winner. comp_us is the winner's compensation, which becomes part of
+    // the effective channel the estimate is compared against.
+    float comp_us = 0.0f;
+    if (sweep_mode) {
+      float                  best_frac = -1.0f;
+      srsran_chest_ul_rank_t best_rank = {};
+      for (int ck = SWEEP_K_MIN; ck <= SWEEP_K_MAX; ck++) {
+        float tau_k = (float)ck * SWEEP_STEP_US;
+        // Compensating a delay of tau_k multiplies subcarrier n by e^{+j*2pi*15kHz*tau_k*n}
+        for (uint32_t l = 0; l < 2 * nsymb; l++) {
+          srsran_vec_apply_cfo(&input[l * cell.nof_prb * SRSRAN_NRE],
+                               15e3f * 1e-6f * tau_k,
+                               &grid_cand[l * cell.nof_prb * SRSRAN_NRE],
+                               cell.nof_prb * SRSRAN_NRE);
+        }
+        srsran_chest_ul_rank_t rank = {};
+        if (srsran_chest_ul_rank_pusch(&est, &ul_sf, &cfg, grid_cand, SWEEP_STEP_US / 2.0f + 2.35f, &rank)) {
+          ERROR("Error ranking timing hypothesis");
+          goto quality_exit;
+        }
+        if (rank.energy_frac > best_frac) {
+          best_frac = rank.energy_frac;
+          best_rank = rank;
+          comp_us   = tau_k;
+        }
+      }
+      // Rebuild the winner's grid and run the estimate with the window centered on the ranked delay
+      for (uint32_t l = 0; l < 2 * nsymb; l++) {
+        srsran_vec_apply_cfo(&input[l * cell.nof_prb * SRSRAN_NRE],
+                             15e3f * 1e-6f * comp_us,
+                             &grid_cand[l * cell.nof_prb * SRSRAN_NRE],
+                             cell.nof_prb * SRSRAN_NRE);
+      }
+      if (srsran_chest_ul_estimate_pusch_win(&est, &ul_sf, &cfg, grid_cand, best_rank.delay_us, &res)) {
+        ERROR("Error running centered channel estimation");
+        goto quality_exit;
+      }
+    } else if (!isnan(win_center_us)) {
+      if (srsran_chest_ul_estimate_pusch_win(&est, &ul_sf, &cfg, input, win_center_us, &res)) {
+        ERROR("Error running centered channel estimation");
+        goto quality_exit;
+      }
+    } else if (srsran_chest_ul_estimate_pusch(&est, &ul_sf, &cfg, input, &res)) {
       ERROR("Error running channel estimation");
       goto quality_exit;
     }
 
-    // Accumulate CE error over the allocated REs of both slots
+    // Accumulate CE error over the allocated REs of both slots. In sweep mode the winner's compensation
+    // ramp is part of the effective channel the estimator saw.
     for (uint32_t l = 0; l < 2 * nsymb; l++) {
       uint32_t slot = l / nsymb;
       uint32_t k0   = cfg.grant.n_prb_tilde[slot] * SRSRAN_NRE;
       for (uint32_t k = 0; k < L_prb * SRSRAN_NRE; k++) {
-        uint32_t idx = l * cell.nof_prb * SRSRAN_NRE + k0 + k;
-        cf_t     err = res.ce[idx] - h[idx];
+        uint32_t idx  = l * cell.nof_prb * SRSRAN_NRE + k0 + k;
+        cf_t     href = h[idx];
+        if (comp_us != 0.0f) {
+          href *= cexpf(I * 2.0f * M_PI * 15e3f * 1e-6f * comp_us * (float)(k0 + k));
+        }
+        cf_t err = res.ce[idx] - href;
         mse_acc += __real__(err * conjf(err));
         mse_count++;
       }
@@ -298,7 +366,8 @@ static int run_quality_mode(void)
     sig_pow_acc += sig_pow;
     noise_est_acc += res.noise_estimate;
     n0_acc += n0;
-    ta_acc += res.ta_us;
+    // In sweep mode the recovered timing is the coarse candidate plus the estimator's residual TA
+    ta_acc += (double)comp_us + res.ta_us;
     if (!isnan(res.cfo_hz)) {
       cfo_valid_seen = true;
     }
@@ -343,8 +412,9 @@ static int run_quality_mode(void)
     ERROR("Noise estimate error %.2f dB exceeds threshold %.2f dB", noise_err_db, max_noise_err_db);
     goto quality_exit;
   }
-  // With a timing-offset stimulus the reported TA must match it
-  if (timing_off_us != 0.0f && fabsf(ta_avg - timing_off_us) > 0.2f) {
+  // With a timing-offset stimulus the recovered timing (coarse candidate + residual TA in sweep mode)
+  // must match it. Skipped with an explicit -w center: a deliberately wrong center caps the reported TA.
+  if (timing_off_us != 0.0f && isnan(win_center_us) && fabsf(ta_avg - timing_off_us) > 0.2f) {
     ERROR("TA estimate %.2f us deviates from the true %.2f us offset", ta_avg, timing_off_us);
     goto quality_exit;
   }
@@ -372,6 +442,9 @@ quality_exit:
   }
   if (r_dmrs) {
     free(r_dmrs);
+  }
+  if (grid_cand) {
+    free(grid_cand);
   }
   printf("%s\n", ret ? "Error" : "OK");
   return ret;

@@ -121,6 +121,12 @@ int srsran_chest_ul_init(srsran_chest_ul_t* q, uint32_t max_prb)
     srsran_dft_plan_set_norm(&q->dft_fwd, true);
     srsran_dft_plan_set_norm(&q->dft_bwd, true);
     q->dft_size = MAX_REFS_SYM;
+
+    q->delay_profile = srsran_vec_f_malloc(MAX_REFS_SYM);
+    if (!q->delay_profile) {
+      perror("malloc");
+      goto clean_exit;
+    }
   }
 
   ret = SRSRAN_SUCCESS;
@@ -143,6 +149,9 @@ void srsran_chest_ul_free(srsran_chest_ul_t* q)
   srsran_cedron_freq_est_free(&q->srsran_cedron_freq_est);
   srsran_dft_plan_free(&q->dft_fwd);
   srsran_dft_plan_free(&q->dft_bwd);
+  if (q->delay_profile) {
+    free(q->delay_profile);
+  }
 
   if (q->pilot_estimates) {
     free(q->pilot_estimates);
@@ -413,6 +422,69 @@ static void average_pilots(srsran_chest_ul_t*     q,
 // Extra kept bins on each side, absorbing the sinc leakage of fractional-delay paths
 #define PUSCH_DFT_MARGIN_BINS 3
 
+// Physical bound on the automatic timing de-rotation (~2 CP): a slope estimate beyond it (e.g. captured by
+// receiver clipping products) saturates instead of being applied. Larger real offsets need the hypothesis
+// sweep (srsran_chest_ul_rank_pusch) rather than a blind de-rotation.
+#define PUSCH_DEROT_CLAMP_US 9.4f
+// With an externally supplied window center, the measured slope may only fine-tune within this many delay
+// bins of it: the energy-verified center is authoritative, the phase measurement is not
+#define PUSCH_WIN_RESID_BINS 2.0f
+// Energy-capture guard: minimum fraction of pilot energy inside the projection window (also floored at
+// twice the noise-only expectation keep/nrefs). SNR-independent on purpose, so a clipping-skewed SNR
+// pre-estimate cannot weaken it. A miss means the window does not contain the channel (or the pilots are
+// too distorted to tell) and the projection must yield to a short FIR.
+#define PUSCH_DFT_GUARD_MIN_FRAC 0.25f
+
+// Delay bins per micro-second of a nrefs-point pilot DFT (15 kHz subcarrier spacing)
+#define PUSCH_BINS_PER_US(nrefs) (15e3f * 1e-6f * (float)(nrefs))
+
+/// Half-width of the delay window a within-CP channel can occupy after its mean delay is centered at 0
+static uint32_t pusch_dft_half_win(uint32_t nrefs)
+{
+  return (uint32_t)ceilf(0.5f * PUSCH_DFT_DELAY_SPAN_S * 15e3f * (float)nrefs) + PUSCH_DFT_MARGIN_BINS;
+}
+
+/// Replans the delay-domain transforms for this allocation width (no-op when already planned)
+static int pusch_dft_replan(srsran_chest_ul_t* q, uint32_t nrefs)
+{
+  if (q->dft_size != nrefs) {
+    if (srsran_dft_replan_c(&q->dft_fwd, nrefs) || srsran_dft_replan_c(&q->dft_bwd, nrefs)) {
+      ERROR("Error replanning delay-domain DFT to %d points", nrefs);
+      return SRSRAN_ERROR;
+    }
+    q->dft_size = nrefs;
+  }
+  return SRSRAN_SUCCESS;
+}
+
+/// Accumulates the delay-power profile of the LS pilot estimates into q->delay_profile (both slots summed;
+/// hopping-safe, since the delay support is common to the slots). Returns the total profile power.
+static float pusch_delay_profile(srsran_chest_ul_t* q, uint32_t nrefs, uint32_t nslots)
+{
+  cf_t* delay = q->tmp_noise; // scratch, free at this point
+  srsran_vec_f_zero(q->delay_profile, nrefs);
+  float total = 0.0f;
+  for (uint32_t i = 0; i < nslots; i++) {
+    srsran_dft_run_c(&q->dft_fwd, &q->pilot_estimates[i * nrefs], delay);
+    for (uint32_t d = 0; d < nrefs; d++) {
+      float p = __real__ delay[d] * __real__ delay[d] + __imag__ delay[d] * __imag__ delay[d];
+      q->delay_profile[d] += p;
+      total += p;
+    }
+  }
+  return total;
+}
+
+/// Sums the delay-power profile over a window of +/-half_win bins around the signed center bin s
+static float pusch_profile_window_power(const float* profile, uint32_t nrefs, int s, uint32_t half_win)
+{
+  float sum = 0.0f;
+  for (int d = s - (int)half_win; d <= s + (int)half_win; d++) {
+    sum += profile[((d % (int)nrefs) + (int)nrefs) % (int)nrefs];
+  }
+  return sum;
+}
+
 // Cross-slot DMRS averaging engages only when the pilot phase drift over 0.5 ms stays below a threshold,
 // i.e. the channel is time-flat (residual CFO below ~64 Hz and low Doppler). Since the combining aligns
 // with the measured phase, the gate only needs to reject genuine channel changes, not measurement noise:
@@ -657,11 +729,12 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
   res->noise_estimate_dbFs = srsran_convert_power_to_dBm(res->noise_estimate);
 }
 
-int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
-                                   srsran_ul_sf_cfg_t*    sf,
-                                   srsran_pusch_cfg_t*    cfg,
-                                   cf_t*                  input,
-                                   srsran_chest_ul_res_t* res)
+int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
+                                       srsran_ul_sf_cfg_t*    sf,
+                                       srsran_pusch_cfg_t*    cfg,
+                                       cf_t*                  input,
+                                       float                  window_delay_us,
+                                       srsran_chest_ul_res_t* res)
 {
   if (!q->dmrs_signal_configured) {
     ERROR("Error must call srsran_chest_ul_set_cfg() before using the UL estimator");
@@ -699,10 +772,29 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
   // pre-TA-convergence grants such as msg3) and which inflates the second-difference SNR pre-estimate.
   // De-rotation is unitary, so the noise statistics and the modeled filter bias are unchanged; the slope
   // is re-applied to the smoothed estimates inside chest_ul_estimate.
-  bool  meas_ta_en = cfg->meas_ta_en;
-  float derot_ta_us = 0.0f;
-  if (q->pusch_opts.ta_derotation) {
-    float fe = measure_pilot_slope(q, SRSRAN_NOF_SLOTS_PER_SF, nrefs_sym, cfg->use_cedron_alg);
+  // With an externally supplied window center (the winning timing hypothesis of a sweeping decoder, see
+  // srsran_chest_ul_rank_pusch) the center is authoritative: the measured slope may only fine-tune within
+  // +/-PUSCH_WIN_RESID_BINS delay bins of it, so a phase measurement corrupted by clipping or interference
+  // can never move the processing away from where the energy was actually found. Without a center, the
+  // measured slope is applied whole, bounded by the physical +/-PUSCH_DEROT_CLAMP_US.
+  bool  meas_ta_en   = cfg->meas_ta_en;
+  float derot_ta_us  = 0.0f;
+  bool  win_centered = !isnan(window_delay_us);
+  if (q->pusch_opts.ta_derotation || win_centered) {
+    float fe = 0.0f;
+    if (q->pusch_opts.ta_derotation) {
+      fe = measure_pilot_slope(q, SRSRAN_NOF_SLOTS_PER_SF, nrefs_sym, cfg->use_cedron_alg);
+    }
+    if (win_centered) {
+      float fe_center = PUSCH_BINS_PER_US(1) * window_delay_us; // normalized frequency per us times us
+      fe_center       = SRSRAN_MAX(-0.45f, SRSRAN_MIN(0.45f, fe_center));
+      float resid_max = PUSCH_WIN_RESID_BINS / (float)nrefs_sym;
+      float resid     = SRSRAN_MAX(-resid_max, SRSRAN_MIN(resid_max, fe - fe_center));
+      fe              = fe_center + resid;
+    } else {
+      float fe_max = PUSCH_BINS_PER_US(1) * PUSCH_DEROT_CLAMP_US;
+      fe           = SRSRAN_MAX(-fe_max, SRSRAN_MIN(fe_max, fe));
+    }
     if (isnormal(fe)) {
       // Pilots carry e^{-j*2pi*fe*k}: multiply by the conjugate ramp (srsran_vec_apply_cfo applies
       // e^{+j*2pi*cfo*n}). The slope is common to both slots - even under hopping only the constant
@@ -711,8 +803,8 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
         srsran_vec_apply_cfo(&q->pilot_estimates[i * nrefs_sym], fe, &q->pilot_estimates[i * nrefs_sym], nrefs_sym);
       }
       proc.derot_cfo = fe;
-      // The measured slope IS the time alignment error; the flattened pilots would measure ~0, so take
-      // over the TA measurement from chest_ul_estimate
+      // The applied slope IS the (residual) time alignment error; the flattened pilots would measure ~0,
+      // so take over the TA measurement from chest_ul_estimate
       derot_ta_us = pilot_slope_to_ta_us(fe, 1);
       meas_ta_en  = false;
     }
@@ -744,22 +836,40 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
   // (plus a leakage margin) covers the physical delay spread. The channel passes undistorted at any SNR,
   // so the projection replaces the FIR whenever it also removes more noise: its noise gain is the
   // kept-bin fraction, the FIR's is the squared norm of its taps.
+  res->delay_energy_frac = NAN;
   if (q->pusch_opts.dft_denoise && nrefs_sym >= PUSCH_DFT_MIN_NREFS) {
-    uint32_t half_win =
-        (uint32_t)ceilf(0.5f * PUSCH_DFT_DELAY_SPAN_S * 15e3f * (float)nrefs_sym) + PUSCH_DFT_MARGIN_BINS;
-    float fir_gain = 0.0f;
+    uint32_t half_win = pusch_dft_half_win(nrefs_sym);
+    float    fir_gain = 0.0f;
     for (uint32_t i = 0; i < proc.filter_len; i++) {
       fir_gain += proc.filter[i] * proc.filter[i];
     }
     if ((float)(2 * half_win + 1) < fir_gain * (float)nrefs_sym) {
-      if (q->dft_size != (uint32_t)nrefs_sym) {
-        if (srsran_dft_replan_c(&q->dft_fwd, nrefs_sym) || srsran_dft_replan_c(&q->dft_bwd, nrefs_sym)) {
-          ERROR("Error replanning delay-domain DFT to %d points", nrefs_sym);
-          return SRSRAN_ERROR;
-        }
-        q->dft_size = (uint32_t)nrefs_sym;
+      if (pusch_dft_replan(q, (uint32_t)nrefs_sym)) {
+        return SRSRAN_ERROR;
       }
       proc.dft_half_win = half_win;
+
+      // Energy-capture guard: after de-rotation/centering the channel must sit inside the projection
+      // window. If it does not (timing beyond the de-rotation clamp, a wrong externally-supplied center,
+      // clipping products spread across the delay axis), the projection would delete channel energy - the
+      // one catastrophic failure mode of this pipeline - so it yields to the shortest FIR instead, which
+      // degrades gracefully under the same conditions.
+      float total = pusch_delay_profile(q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF);
+      if (isnormal(total)) {
+        float frac = pusch_profile_window_power(q->delay_profile, nrefs_sym, 0, half_win) / total;
+        res->delay_energy_frac = frac;
+        float keep_frac        = (float)(2 * half_win + 1) / (float)nrefs_sym;
+        if (frac < SRSRAN_MAX(PUSCH_DFT_GUARD_MIN_FRAC, 2.0f * keep_frac)) {
+          proc.dft_half_win = 0;
+          proc.filter       = q->smooth_filter; // legacy 3-tap taps: least-assumption fallback
+          proc.filter_len   = q->smooth_filter_len;
+          proc.trunc_edges  = true;
+        }
+      } else {
+        // No measurable pilot energy: nothing for the projection to protect, use the FIR path
+        proc.dft_half_win      = 0;
+        res->delay_energy_frac = 0.0f;
+      }
     }
   }
 
@@ -782,6 +892,121 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
   }
 
   return 0;
+}
+
+int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
+                                   srsran_ul_sf_cfg_t*    sf,
+                                   srsran_pusch_cfg_t*    cfg,
+                                   cf_t*                  input,
+                                   srsran_chest_ul_res_t* res)
+{
+  return srsran_chest_ul_estimate_pusch_win(q, sf, cfg, input, NAN, res);
+}
+
+int srsran_chest_ul_rank_pusch(srsran_chest_ul_t*      q,
+                               srsran_ul_sf_cfg_t*     sf,
+                               srsran_pusch_cfg_t*     cfg,
+                               cf_t*                   input,
+                               float                   max_delay_us,
+                               srsran_chest_ul_rank_t* rank)
+{
+  if (q == NULL || sf == NULL || cfg == NULL || input == NULL || rank == NULL) {
+    return SRSRAN_ERROR_INVALID_INPUTS;
+  }
+  if (!q->dmrs_signal_configured) {
+    ERROR("Error must call srsran_chest_ul_set_cfg() before using the UL estimator");
+    return SRSRAN_ERROR;
+  }
+
+  rank->energy_frac = 0.0f;
+  rank->delay_us    = 0.0f;
+  rank->epre        = 0.0f;
+  rank->reliable    = false;
+
+  uint32_t nof_prb = cfg->grant.L_prb;
+  if (!srsran_dft_precoding_valid_prb(nof_prb)) {
+    ERROR("Error invalid nof_prb=%d", nof_prb);
+    return SRSRAN_ERROR_INVALID_INPUTS;
+  }
+
+  uint32_t nrefs_sym = nof_prb * SRSRAN_NRE;
+  uint32_t nrefs_sf  = nrefs_sym * SRSRAN_NOF_SLOTS_PER_SF;
+
+  // Same LS estimation as the full estimate (shares the pilot scratch buffers)
+  srsran_refsignal_dmrs_pusch_get(&q->dmrs_signal, cfg, input, q->pilot_recv_signal);
+  srsran_vec_prod_conj_ccc(q->pilot_recv_signal,
+                           q->dmrs_pregen.r[cfg->grant.n_dmrs][sf->tti % SRSRAN_NOF_SF_X_FRAME][nof_prb],
+                           q->pilot_estimates,
+                           nrefs_sf);
+
+  rank->epre = srsran_vec_avg_power_cf(q->pilot_recv_signal, nrefs_sf);
+
+  if (pusch_dft_replan(q, nrefs_sym)) {
+    return SRSRAN_ERROR;
+  }
+
+  // NOTE: deliberately no timing de-rotation here - the metric must stay sensitive to the timing
+  // hypothesis being ranked. The raw delay-power profile carries the full +/-33 us unambiguous span.
+  float total = pusch_delay_profile(q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF);
+  if (!isnormal(total)) {
+    return SRSRAN_SUCCESS; // dead air: frac 0, not reliable
+  }
+
+  // The physical-channel window, clamped so it can never cover most of a narrow allocation's profile
+  // (which would flatten the metric and make every hypothesis look good)
+  uint32_t half_win = SRSRAN_MIN(pusch_dft_half_win(nrefs_sym), nrefs_sym / 6);
+  if (2 * half_win + 1 >= nrefs_sym) {
+    rank->energy_frac = 1.0f;
+    return SRSRAN_SUCCESS; // degenerate: no discrimination possible, not reliable
+  }
+
+  // Search the window center over +/-span bins around delay 0. The caller-supplied bound keeps the search
+  // from locking onto another UE's cyclic-shift delay peak or an alias, and preserves the discrimination
+  // between the caller's coarse candidates.
+  int span = (int)(nrefs_sym / 2 - half_win - 1);
+  if (max_delay_us > 0.0f) {
+    int req = (int)ceilf(PUSCH_BINS_PER_US(nrefs_sym) * max_delay_us);
+    span    = SRSRAN_MAX(1, SRSRAN_MIN(span, req));
+  }
+
+  float best_sum = -1.0f;
+  int   best_s   = 0;
+  float sum      = pusch_profile_window_power(q->delay_profile, nrefs_sym, -span, half_win);
+  for (int s = -span; s <= span; s++) {
+    if (s > -span) {
+      // Slide the window one bin: add the new leading bin, drop the old trailing one (circular)
+      int lead  = ((s + (int)half_win) % (int)nrefs_sym + (int)nrefs_sym) % (int)nrefs_sym;
+      int trail = ((s - (int)half_win - 1) % (int)nrefs_sym + (int)nrefs_sym) % (int)nrefs_sym;
+      sum += q->delay_profile[lead] - q->delay_profile[trail];
+    }
+    if (sum > best_sum) {
+      best_sum = sum;
+      best_s   = s;
+    }
+  }
+
+  rank->energy_frac = best_sum / total;
+
+  // The captured-energy function is flat wherever the whole channel fits inside the window, so the argmax
+  // alone can sit anywhere on that plateau. The power centroid within the winning window recovers the
+  // channel's actual center delay with sub-bin resolution (noise pulls it toward the window center by a
+  // negligible amount whenever the guard/ranking thresholds are met).
+  float wsum = 0.0f;
+  float csum = 0.0f;
+  for (int o = -(int)half_win; o <= (int)half_win; o++) {
+    int d = (((best_s + o) % (int)nrefs_sym) + (int)nrefs_sym) % (int)nrefs_sym;
+    wsum += q->delay_profile[d];
+    csum += q->delay_profile[d] * (float)(best_s + o);
+  }
+  float center_s = (wsum > 0.0f) ? (csum / wsum) : (float)best_s;
+  center_s       = SRSRAN_MAX(-(float)span, SRSRAN_MIN((float)span, center_s));
+
+  // A ramp e^{-j*2pi*fe*k} (late UE, fe > 0) peaks at signed bin -fe*nrefs, so delay and bin have
+  // opposite signs; report with the ta_us convention (positive = late)
+  rank->delay_us = -center_s / PUSCH_BINS_PER_US(nrefs_sym);
+  rank->reliable = (nrefs_sym >= 24);
+
+  return SRSRAN_SUCCESS;
 }
 
 void srsran_chest_ul_set_pusch_opts(srsran_chest_ul_t* q, const srsran_chest_ul_pusch_opts_t* opts)
@@ -827,6 +1052,7 @@ int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
     ERROR("Error computing N_rs");
     return SRSRAN_ERROR;
   }
+  res->delay_energy_frac = NAN; // PUSCH-only metric, avoid stale values in reused results
   int nrefs_sf = SRSRAN_NRE * n_rs * SRSRAN_NOF_SLOTS_PER_SF;
 
   /* Get references from the input signal */
@@ -995,6 +1221,8 @@ int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
 
   // Compute least squares estimates
   srsran_vec_prod_conj_ccc(q->pilot_recv_signal, known_pilots, q->pilot_estimates, n_srs_re);
+
+  res->delay_energy_frac = NAN; // PUSCH-only metric, avoid stale values in reused results
 
   // Estimate with the legacy processing: shared filter, extrapolated edges, no PUSCH-only features
   uint32_t        n_prb[2] = {};
