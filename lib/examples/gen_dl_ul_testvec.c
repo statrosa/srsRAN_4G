@@ -52,21 +52,36 @@
 
 #define FDD_UL_DELAY_MS 4 // FDD: format-0 grant in subframe n -> PUSCH in subframe n+4
 
+#define MAX_RNTIS 32
+
 static uint32_t cell_id       = 1;
 static uint32_t nof_prb       = 6;
-static uint16_t rnti          = 0x46;
+static uint16_t rntis[MAX_RNTIS] = {0x46};
+static uint32_t nof_rntis     = 1;
 static uint32_t mcs_idx       = 10;
 static int      L_rb          = -1; // default: full band
 static uint32_t nof_subframes = 200;
 static char*    dl_file       = NULL;
 static char*    ul_file       = NULL;
 
+// Parse a comma-separated hex C-RNTI list (e.g. "0x46,0x47,0x48").
+static void parse_rnti_list(char* s)
+{
+  nof_rntis = 0;
+  for (char* tok = strtok(s, ","); tok && nof_rntis < MAX_RNTIS; tok = strtok(NULL, ",")) {
+    rntis[nof_rntis++] = (uint16_t)strtol(tok, NULL, 16);
+  }
+  if (nof_rntis == 0) {
+    nof_rntis = 1;
+  }
+}
+
 static void usage(char* prog)
 {
   printf("Usage: %s -o dl.iq -O ul.iq [options]\n", prog);
   printf("\t-c cell_id [Default %d]\n", cell_id);
   printf("\t-p nof_prb [Default %d]\n", nof_prb);
-  printf("\t-r C-RNTI in hex [Default 0x%x]\n", rnti);
+  printf("\t-r Comma-separated C-RNTI list in hex, round-robin per subframe [Default 0x46]\n");
   printf("\t-m PUSCH MCS index [Default %d]\n", mcs_idx);
   printf("\t-L L_rb (PUSCH nof PRB) [Default full band]\n");
   printf("\t-n nof_subframes [Default %d]\n", nof_subframes);
@@ -86,7 +101,7 @@ static void parse_args(int argc, char** argv)
         nof_prb = (uint32_t)strtol(optarg, NULL, 10);
         break;
       case 'r':
-        rnti = (uint16_t)strtol(optarg, NULL, 16);
+        parse_rnti_list(optarg);
         break;
       case 'm':
         mcs_idx = (uint32_t)strtol(optarg, NULL, 10);
@@ -161,7 +176,7 @@ int main(int argc, char** argv)
   }
 
   srsran_ue_ul_cfg_t ue_ul_cfg = {};
-  ue_ul_cfg.ul_cfg.pusch.rnti  = rnti;
+  ue_ul_cfg.ul_cfg.pusch.rnti  = rntis[0];
   // DMRS defaults match sib.conf.example ul_rs and dl_ul_capture_align defaults.
   ue_ul_cfg.ul_cfg.dmrs.cyclic_shift        = 0;
   ue_ul_cfg.ul_cfg.dmrs.delta_ss            = 0;
@@ -175,9 +190,9 @@ int main(int argc, char** argv)
   srsran_softbuffer_tx_t softbuffer = {};
   srsran_softbuffer_tx_init(&softbuffer, nof_prb);
 
-  // Constant UL grant carried by the format-0 DCI in every DL subframe.
+  // Constant UL grant carried by the format-0 DCI in every DL subframe (the RNTI
+  // is set per subframe below, cycling through the configured C-RNTI list).
   srsran_dci_ul_t dci_ul  = {};
-  dci_ul.rnti             = rnti;
   dci_ul.freq_hop_fl      = SRSRAN_RA_PUSCH_HOP_DISABLED;
   dci_ul.type2_alloc.riv  = srsran_ra_type2_to_riv((uint32_t)L_rb, 0, nof_prb);
   dci_ul.tb.mcs_idx       = mcs_idx;
@@ -207,9 +222,13 @@ int main(int argc, char** argv)
 
     srsran_enb_dl_put_base(&enb_dl, &dl_sf);
 
-    // Place the DCI at the UE search space so find_ul_dci recovers it.
+    // This subframe's grant targets one C-RNTI from the list (round-robin).
+    uint16_t cur_rnti = rntis[i % nof_rntis];
+    dci_ul.rnti       = cur_rnti;
+
+    // Place the DCI at that C-RNTI's UE search space so find_ul_dci recovers it.
     srsran_dci_location_t locs[SRSRAN_MAX_CANDIDATES_UE] = {};
-    uint32_t nloc = srsran_pdcch_ue_locations(&enb_dl.pdcch, &enb_dl.dl_sf, locs, SRSRAN_MAX_CANDIDATES_UE, rnti);
+    uint32_t nloc = srsran_pdcch_ue_locations(&enb_dl.pdcch, &enb_dl.dl_sf, locs, SRSRAN_MAX_CANDIDATES_UE, cur_rnti);
     if (nloc > 0) {
       dci_ul.location = locs[0];
       if (srsran_enb_dl_put_pdcch_ul(&enb_dl, &dci_cfg, &dci_ul) == SRSRAN_SUCCESS) {
@@ -229,8 +248,10 @@ int main(int argc, char** argv)
         ERROR("Error computing PUSCH grant at sf %d", i);
         exit(-1);
       }
+      // The PUSCH answers the grant issued 4 subframes earlier, so it is
+      // scrambled with that grant's C-RNTI (round-robin, offset by the delay).
       ue_ul_cfg.ul_cfg.pusch.grant         = grant;
-      ue_ul_cfg.ul_cfg.pusch.rnti          = rnti;
+      ue_ul_cfg.ul_cfg.pusch.rnti          = rntis[(i - FDD_UL_DELAY_MS) % nof_rntis];
       srsran_softbuffer_tx_reset(&softbuffer);
       ue_ul_cfg.ul_cfg.pusch.softbuffers.tx = &softbuffer;
 
@@ -254,7 +275,7 @@ int main(int argc, char** argv)
          ul_file,
          cell_id,
          nof_prb,
-         rnti);
+         rntis[0]);
 
   srsran_filesink_free(&dl_sink);
   srsran_filesink_free(&ul_sink);
