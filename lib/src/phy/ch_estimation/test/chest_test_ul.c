@@ -51,6 +51,8 @@ static float    cfo_hz           = 0.0f;     // carrier frequency offset emulate
 static float    timing_off_us    = 0.0f;     // timing offset emulated as a phase ramp across frequency
 static float    win_center_us    = NAN;      // explicit window center for the centered-estimate API
 static bool     sweep_mode       = false;    // rank a coarse timing sweep, then centered-estimate the winner
+static bool     track_mode       = false;    // maintain a per-UE tracker across subframes and feed priors back
+static bool     dtx_mode         = false;    // with -T: every 4th subframe the UE misses its grant (noise only)
 
 // Coarse sweep emulation: 64-sample FFT-window steps at 15.36 Msps (10 MHz LTE), i.e. the user-style
 // [-64, +512] window expressed in micro-seconds, covering late arrivals up to ~33 us
@@ -78,6 +80,8 @@ void usage(char* prog)
   printf("\t-t to_us: emulate timing offset in micro-seconds (quality mode) [Default 0]\n");
   printf("\t-w center_us: use the centered-window estimate API with this center (quality mode)\n");
   printf("\t-W emulate a coarse timing sweep: rank candidates, centered-estimate the winner\n");
+  printf("\t-T per-UE tracking: maintain link priors across subframes and feed them back\n");
+  printf("\t-D with -T: inject DTX (missed grant) every 4th subframe, must not poison the tracker\n");
   printf("\t-M max CE NMSE (linear, vs N0 with noise, vs channel power without) [Default no check]\n");
   printf("\t-E max noise estimate error in dB (quality mode) [Default no check]\n");
 
@@ -88,7 +92,7 @@ void usage(char* prog)
 void parse_args(int argc, char** argv)
 {
   int opt;
-  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:t:w:WM:E:v")) != -1) {
+  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:t:w:WTDM:E:v")) != -1) {
     switch (opt) {
       case 'r':
         cell.nof_prb = (uint32_t)strtol(optarg, NULL, 10);
@@ -125,6 +129,12 @@ void parse_args(int argc, char** argv)
         break;
       case 'W':
         sweep_mode = true;
+        break;
+      case 'T':
+        track_mode = true;
+        break;
+      case 'D':
+        dtx_mode = true;
         break;
       case 'M':
         max_nmse = strtof(optarg, NULL);
@@ -190,6 +200,14 @@ static int run_quality_mode(void)
     ERROR("Invalid L_prb=%d for cell.nof_prb=%d (hopping=%d)", L_prb, cell.nof_prb, intra_sf_hop);
     goto quality_exit;
   }
+  if (track_mode && (sweep_mode || !isnan(win_center_us))) {
+    ERROR("-T cannot be combined with -W or -w");
+    goto quality_exit;
+  }
+  if (dtx_mode && (!track_mode || isnan(snr_db))) {
+    ERROR("-D requires -T and -s");
+    goto quality_exit;
+  }
   if (!srsran_dft_precoding_valid_prb(L_prb)) {
     ERROR("Invalid L_prb=%d for PUSCH", L_prb);
     goto quality_exit;
@@ -245,7 +263,12 @@ static int run_quality_mode(void)
   double n0_acc        = 0.0;
   double ta_acc        = 0.0;
   uint64_t mse_count   = 0;
+  uint32_t nof_sf_meas = 0; // subframes contributing to the metrics (DTX subframes are excluded)
   bool   cfo_valid_seen = false;
+  float  n0_dtx         = 0.0f; // noise power of the last transmitted subframe, reused on DTX injections
+
+  srsran_chest_ul_track_t track;
+  srsran_chest_ul_track_reset(&track);
 
   for (uint32_t sf_run = 0; sf_run < nof_sf; sf_run++) {
     srsran_ul_sf_cfg_t ul_sf;
@@ -253,49 +276,55 @@ static int run_quality_mode(void)
     ul_sf.tti = sf_run % 10240;
 
     float sf_phase = 2.0f * M_PI * ((float)rand() / RAND_MAX - 0.5f);
+    bool  dtx_sf   = dtx_mode && (sf_run % 4 == 3); // the UE misses every 4th grant
 
-    // Build transmit grid: DMRS + unit-power QPSK data on the allocated REs
+    // Build transmit grid: DMRS + unit-power QPSK data on the allocated REs (nothing on DTX)
     srsran_vec_cf_zero(input, sf_len_re);
-    if (srsran_refsignal_dmrs_pusch_gen(
-            &est.dmrs_signal, &dmrs_cfg, L_prb, ul_sf.tti % 10, cfg.grant.n_dmrs, r_dmrs)) {
-      ERROR("Error generating DMRS");
-      goto quality_exit;
-    }
-    srsran_refsignal_dmrs_pusch_put(&est.dmrs_signal, &cfg, r_dmrs, input);
-
-    for (uint32_t l = 0; l < 2 * nsymb; l++) {
-      uint32_t slot = l / nsymb;
-      if (l == SRSRAN_REFSIGNAL_UL_L(slot, cell.cp)) {
-        continue; // DMRS already placed
-      }
-      uint32_t k0 = cfg.grant.n_prb_tilde[slot] * SRSRAN_NRE;
-      for (uint32_t k = 0; k < L_prb * SRSRAN_NRE; k++) {
-        float re                                        = (rand() & 1) ? M_SQRT1_2 : -M_SQRT1_2;
-        float im                                        = (rand() & 1) ? M_SQRT1_2 : -M_SQRT1_2;
-        input[l * cell.nof_prb * SRSRAN_NRE + k0 + k] = re + I * im;
-      }
-    }
-
-    // Apply channel on the allocated REs and store the true gains for comparison
     srsran_vec_cf_zero(h, sf_len_re);
     float sig_pow = 0.0f;
-    for (uint32_t l = 0; l < 2 * nsymb; l++) {
-      uint32_t slot = l / nsymb;
-      uint32_t k0   = cfg.grant.n_prb_tilde[slot] * SRSRAN_NRE;
-      for (uint32_t k = 0; k < L_prb * SRSRAN_NRE; k++) {
-        uint32_t idx = l * cell.nof_prb * SRSRAN_NRE + k0 + k;
-        h[idx]       = channel_gain(l, k0 + k, sf_phase);
-        input[idx] *= h[idx];
-        sig_pow += __real__(h[idx] * conjf(h[idx]));
+    if (!dtx_sf) {
+      if (srsran_refsignal_dmrs_pusch_gen(
+              &est.dmrs_signal, &dmrs_cfg, L_prb, ul_sf.tti % 10, cfg.grant.n_dmrs, r_dmrs)) {
+        ERROR("Error generating DMRS");
+        goto quality_exit;
       }
-    }
-    sig_pow /= (float)(2 * nsymb * L_prb * SRSRAN_NRE);
+      srsran_refsignal_dmrs_pusch_put(&est.dmrs_signal, &cfg, r_dmrs, input);
 
-    // AWGN
+      for (uint32_t l = 0; l < 2 * nsymb; l++) {
+        uint32_t slot = l / nsymb;
+        if (l == SRSRAN_REFSIGNAL_UL_L(slot, cell.cp)) {
+          continue; // DMRS already placed
+        }
+        uint32_t k0 = cfg.grant.n_prb_tilde[slot] * SRSRAN_NRE;
+        for (uint32_t k = 0; k < L_prb * SRSRAN_NRE; k++) {
+          float re                                        = (rand() & 1) ? M_SQRT1_2 : -M_SQRT1_2;
+          float im                                        = (rand() & 1) ? M_SQRT1_2 : -M_SQRT1_2;
+          input[l * cell.nof_prb * SRSRAN_NRE + k0 + k] = re + I * im;
+        }
+      }
+
+      // Apply channel on the allocated REs and store the true gains for comparison
+      for (uint32_t l = 0; l < 2 * nsymb; l++) {
+        uint32_t slot = l / nsymb;
+        uint32_t k0   = cfg.grant.n_prb_tilde[slot] * SRSRAN_NRE;
+        for (uint32_t k = 0; k < L_prb * SRSRAN_NRE; k++) {
+          uint32_t idx = l * cell.nof_prb * SRSRAN_NRE + k0 + k;
+          h[idx]       = channel_gain(l, k0 + k, sf_phase);
+          input[idx] *= h[idx];
+          sig_pow += __real__(h[idx] * conjf(h[idx]));
+        }
+      }
+      sig_pow /= (float)(2 * nsymb * L_prb * SRSRAN_NRE);
+    }
+
+    // AWGN. DTX subframes carry the same noise floor as the last transmitted one.
     float n0 = 0.0f;
     if (!isnan(snr_db)) {
-      n0 = sig_pow / srsran_convert_dB_to_power(snr_db);
+      n0 = dtx_sf ? n0_dtx : sig_pow / srsran_convert_dB_to_power(snr_db);
       srsran_ch_awgn_c(input, input, n0, sf_len_re);
+      if (!dtx_sf) {
+        n0_dtx = n0;
+      }
     }
 
     // Estimate the channel. In sweep mode, first rank the coarse timing candidates like a
@@ -337,6 +366,15 @@ static int run_quality_mode(void)
         ERROR("Error running centered channel estimation");
         goto quality_exit;
       }
+    } else if (track_mode) {
+      // Per-UE tracking loop: priors in, measurements out, DTX subframes flagged as CRC failures
+      srsran_chest_ul_prior_t prior;
+      srsran_chest_ul_track_get_prior(&track, ul_sf.tti, &prior);
+      if (srsran_chest_ul_estimate_pusch_prior(&est, &ul_sf, &cfg, input, &prior, &res)) {
+        ERROR("Error running tracked channel estimation");
+        goto quality_exit;
+      }
+      srsran_chest_ul_track_update(&track, &res, ul_sf.tti, !dtx_sf);
     } else if (!isnan(win_center_us)) {
       if (srsran_chest_ul_estimate_pusch_win(&est, &ul_sf, &cfg, input, win_center_us, &res)) {
         ERROR("Error running centered channel estimation");
@@ -345,6 +383,10 @@ static int run_quality_mode(void)
     } else if (srsran_chest_ul_estimate_pusch(&est, &ul_sf, &cfg, input, &res)) {
       ERROR("Error running channel estimation");
       goto quality_exit;
+    }
+
+    if (dtx_sf) {
+      continue; // nothing transmitted: no metrics to accumulate, the tracker must simply survive it
     }
 
     // Accumulate CE error over the allocated REs of both slots. In sweep mode the winner's compensation
@@ -368,21 +410,26 @@ static int run_quality_mode(void)
     n0_acc += n0;
     // In sweep mode the recovered timing is the coarse candidate plus the estimator's residual TA
     ta_acc += (double)comp_us + res.ta_us;
+    nof_sf_meas++;
     if (!isnan(res.cfo_hz)) {
       cfo_valid_seen = true;
     }
   }
 
+  if (mse_count == 0 || nof_sf_meas == 0) {
+    ERROR("No subframes measured");
+    goto quality_exit;
+  }
   float mse       = (float)(mse_acc / mse_count);
-  float sig_pow   = (float)(sig_pow_acc / nof_sf);
-  float n0        = (float)(n0_acc / nof_sf);
-  float noise_est = (float)(noise_est_acc / nof_sf);
+  float sig_pow   = (float)(sig_pow_acc / nof_sf_meas);
+  float n0        = (float)(n0_acc / nof_sf_meas);
+  float noise_est = (float)(noise_est_acc / nof_sf_meas);
 
   // Without noise, normalize the CE error by the channel power instead of N0
   float nmse         = isnan(snr_db) ? (mse / sig_pow) : (mse / n0);
   float noise_err_db = 10.0f * log10f(noise_est / n0);
 
-  float ta_avg = (float)(ta_acc / nof_sf);
+  float ta_avg = (float)(ta_acc / nof_sf_meas);
 
   printf("L_prb=%d snr_db=%.1f hop=%d selective=%d cfo=%.0f to_us=%.1f nof_sf=%d\n",
          L_prb,

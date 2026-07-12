@@ -97,6 +97,17 @@ add_lte_test(chest_test_ul_sweep_to12_nonoise chest_test_ul -r 50 -L 12 -t 12 -W
 # projection deletes the channel: NMSE 9.9, noise estimate +10.8 dB)
 add_lte_test(chest_test_ul_center_correct chest_test_ul -r 50 -L 25 -s 10 -t 5.0 -w 5.0 -N 100 -M 0.10 -E 0.5)
 add_lte_test(chest_test_ul_center_guard chest_test_ul -r 50 -L 25 -s 10 -t 5.0 -w 0 -N 100 -M 0.30 -E 1.0)
+# Per-UE tracking (-T): link priors (noise, CFO, delay centroid/spread) filtered across subframes and fed
+# back. Window narrowing earns -1.9 dB at 0 dB and is SNR-gated (bit-exact parity at 10 dB); a tracked CFO
+# turns the cross-slot/interp gates into deviation tests (300 Hz: 0.37 -> 0.28; the selective time-drift
+# case becomes deterministic: 4.2 -> 0.32); -D injects DTX every 4th subframe, which must not poison
+# anything (thresholds identical to the DTX-free case)
+add_lte_test(chest_test_ul_track_prb25_snr0 chest_test_ul -r 50 -L 25 -s 0 -T -N 200 -M 0.05 -E 0.5)
+add_lte_test(chest_test_ul_track_parity_snr10 chest_test_ul -r 50 -L 25 -s 10 -T -N 200 -M 0.10 -E 0.5)
+add_lte_test(chest_test_ul_track_dtx chest_test_ul -r 50 -L 25 -s 3 -T -D -N 200 -M 0.075 -E 0.5)
+add_lte_test(chest_test_ul_track_to3 chest_test_ul -r 50 -L 25 -s 3 -t 3.0 -T -N 200 -M 0.075 -E 0.5)
+add_lte_test(chest_test_ul_track_cfo300 chest_test_ul -r 50 -L 1 -s 0 -f 300 -T -N 200 -M 0.35 -E 0.5)
+add_lte_test(chest_test_ul_track_selective chest_test_ul -r 50 -L 12 -s 20 -S -T -N 200 -M 0.6)
 # Frequency-selective channel at high SNR: regression guard against over-smoothing (the time-varying
 # stimulus is also tracked by the high-SNR time interpolation, hence the tight bound)
 add_lte_test(chest_test_ul_quality_selective chest_test_ul -r 50 -L 6 -s 30 -S -N 200 -M 60)

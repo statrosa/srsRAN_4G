@@ -63,7 +63,49 @@ typedef struct SRSRAN_API {
   /// Fraction of pilot energy the delay-domain projection window captured (PUSCH only; NAN when the
   /// projection was not attempted). Low values mean the energy-capture guard forced the FIR fallback.
   float delay_energy_frac;
+  /// Power centroid of the pilot delay profile in micro-seconds, absolute (includes any applied
+  /// de-rotation/window center), noise-floor subtracted. NAN when not measured. Positive = late UE.
+  float delay_centroid_us;
+  /// Delay spread of the pilot profile in micro-seconds (4 standard deviations of the noise-floor
+  /// subtracted in-window profile, approximately the channel's delay support). NAN when not measured.
+  float delay_spread_us;
 } srsran_chest_ul_res_t;
+
+/**
+ * Slowly-varying per-UE link priors fed back into the PUSCH estimator (typically maintained with
+ * srsran_chest_ul_track_t across that UE's transmissions). Invalid entries leave the corresponding
+ * estimator behavior unchanged.
+ */
+typedef struct SRSRAN_API {
+  bool  n0_valid;
+  float n0; ///< Tracked noise power (linear): replaces the per-subframe second-difference SNR pre-estimate,
+            ///< stabilizing the smoothing-tier and time-processing gates
+  bool  cfo_valid;
+  float cfo_hz; ///< Tracked CFO: referenced by the cross-slot gates (a predictable rotation is not channel
+                ///< change) and used to unwrap the measured phase, extending coverage beyond +/-1 kHz
+  bool  delay_valid;
+  float delay_us; ///< Tracked delay centroid: centers the delay window (same mechanism as
+                  ///< srsran_chest_ul_estimate_pusch_win)
+  bool  spread_valid;
+  float spread_us; ///< Tracked delay spread: narrows the projection window below the blind CP/2 bound,
+                   ///< increasing denoising for short-delay-spread channels
+} srsran_chest_ul_prior_t;
+
+/**
+ * Per-UE tracker of slowly-varying link statistics across uplink transmissions. Stateless with respect to
+ * the estimator object: keep one instance per RNTI (e.g. in the eNB PHY UE database), update it after each
+ * PUSCH estimate, and fetch priors before the next. All updates are internally gated (DTX/CRC, SNR,
+ * slew-rate limits) so isolated bad measurements cannot poison the state.
+ */
+typedef struct SRSRAN_API {
+  float    n0_ema;        ///< Noise power (linear); fast attack up, slow decay down
+  float    cfo_hz_ema;    ///< CFO in Hz; slew-limited
+  float    delay_us_ema;  ///< Delay centroid in micro-seconds; slew-limited
+  float    spread_us_ema; ///< Delay spread in micro-seconds; fast widening, slow narrowing
+  uint32_t nof_meas;      ///< Accepted signal-bearing updates so far
+  uint32_t last_tti;      ///< TTI of the last update, for aging
+  bool     init;          ///< True after the first update
+} srsran_chest_ul_track_t;
 
 /**
  * Result of ranking one coarse timing hypothesis with srsran_chest_ul_rank_pusch(). Rank candidates by
@@ -208,6 +250,47 @@ SRSRAN_API int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
                                                   cf_t*                  input,
                                                   float                  window_delay_us,
                                                   srsran_chest_ul_res_t* res);
+
+/**
+ * Like srsran_chest_ul_estimate_pusch() but consuming per-UE tracked link priors (see
+ * srsran_chest_ul_prior_t). prior may be NULL or carry any subset of valid entries; every invalid entry
+ * leaves the corresponding stage exactly as the plain call. The other entry points are wrappers of this
+ * one.
+ */
+SRSRAN_API int srsran_chest_ul_estimate_pusch_prior(srsran_chest_ul_t*             q,
+                                                    srsran_ul_sf_cfg_t*            sf,
+                                                    srsran_pusch_cfg_t*            cfg,
+                                                    cf_t*                          input,
+                                                    const srsran_chest_ul_prior_t* prior,
+                                                    srsran_chest_ul_res_t*         res);
+
+/// Resets a per-UE tracker to the empty state (also the required initialization)
+SRSRAN_API void srsran_chest_ul_track_reset(srsran_chest_ul_track_t* t);
+
+/**
+ * Folds one PUSCH estimation result into the tracker. crc_ok gates the signal-dependent quantities: pass
+ * true when the transport block CRC passed, false on CRC failure or suspected DTX (a missed grant would
+ * otherwise poison the CFO/delay tracks with noise-only measurements). The noise-power track updates
+ * regardless (it is measurable even on DTX), with fast attack for interference bursts. All tracks are
+ * slew-rate limited.
+ */
+SRSRAN_API void
+srsran_chest_ul_track_update(srsran_chest_ul_track_t* t, const srsran_chest_ul_res_t* res, uint32_t tti, bool crc_ok);
+
+/**
+ * Notifies the tracker of a known change of the UE's observed delay (e.g. a MAC timing-advance command:
+ * commanding the UE to advance by X us shifts the observed delay by -X us). Applying the known shift
+ * directly avoids re-learning it through the slew-limited filter.
+ */
+SRSRAN_API void srsran_chest_ul_track_notify_delay_shift(srsran_chest_ul_track_t* t, float delta_us);
+
+/**
+ * Fills the priors for the next estimate of this UE. Entries become valid only after enough accepted
+ * updates and while the state is fresh (age-gated using the 10240-TTI wrap-around); a stale or empty
+ * tracker yields all-invalid priors, i.e. the estimator's default behavior.
+ */
+SRSRAN_API void
+srsran_chest_ul_track_get_prior(const srsran_chest_ul_track_t* t, uint32_t tti, srsran_chest_ul_prior_t* prior);
 
 SRSRAN_API int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
                                               srsran_ul_sf_cfg_t*    sf,

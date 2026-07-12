@@ -246,7 +246,16 @@ typedef struct {
                                      // units (cycles/sample); re-applied to the estimates (0 disables)
   float        cross_slot_max_phase; // cross-slot averaging gate in radians (0 disables)
   float        time_interp_max_phase; // time-interpolation gate in radians (0 disables)
+  float        cross_phase_ref;      // predicted cross-slot phase from a tracked CFO (radians): the gates
+                                     // test the deviation from it (a predictable rotation is not channel
+                                     // change) and the measured phase is unwrapped around it
 } chest_ul_proc_t;
+
+/// Wraps a phase to (-pi, pi]
+static inline float wrap_phase(float x)
+{
+  return x - 2.0f * (float)M_PI * roundf(x / (2.0f * (float)M_PI));
+}
 
 /**
  * Mean phase slope of the LS pilot estimates across frequency, in normalized frequency units
@@ -434,6 +443,11 @@ static void average_pilots(srsran_chest_ul_t*     q,
 // pre-estimate cannot weaken it. A miss means the window does not contain the channel (or the pilots are
 // too distorted to tell) and the projection must yield to a short FIR.
 #define PUSCH_DFT_GUARD_MIN_FRAC 0.25f
+// Spread-prior window narrowing pays only in the noise-limited regime: the saved noise scales with N0
+// while the fractional-delay sinc leakage the narrower window cuts off scales with the channel power.
+// Measured on flat channels: a clear win at <= 3 dB, a wash by 5 dB - so it engages with the same
+// threshold as the widest smoothing tier, keeping "smooth as hard as physics allows" one consistent regime
+#define PUSCH_SPREAD_NARROW_SNR_MAX PUSCH_SMOOTH_SNR_LOW
 
 // Delay bins per micro-second of a nrefs-point pilot DFT (15 kHz subcarrier spacing)
 #define PUSCH_BINS_PER_US(nrefs) (15e3f * 1e-6f * (float)(nrefs))
@@ -540,18 +554,24 @@ pusch_interp_pilots(srsran_chest_ul_t* q, cf_t* ce, uint32_t nrefs, uint32_t n_p
  * filter preserves frequency selectivity. The result is written to q->pusch_filter/pusch_filter_len and
  * the pre-estimated SNR to q->pusch_snr_prior.
  */
-static void pusch_select_filter(srsran_chest_ul_t* q, uint32_t nrefs_sym, uint32_t nslots)
+static void pusch_select_filter(srsran_chest_ul_t* q, uint32_t nrefs_sym, uint32_t nslots, float n0_prior)
 {
-  // Raw noise pre-estimate from pilot second differences, averaged over both slots
   float n0_raw = 0.0f;
-  for (uint32_t s = 0; s < nslots; s++) {
-    const cf_t* p = &q->pilot_estimates[s * nrefs_sym];
-    cf_t*       d = q->tmp_noise; // free at this point, used as scratch
-    srsran_vec_sum_ccc(&p[0], &p[2], d, nrefs_sym - 2);
-    srsran_vec_sub_ccc(d, &p[1], d, nrefs_sym - 2);
-    srsran_vec_sub_ccc(d, &p[1], d, nrefs_sym - 2);
-    // E{|n[k-1] - 2n[k] + n[k+1]|^2} = 6*N0 for white noise
-    n0_raw += srsran_vec_avg_power_cf(d, nrefs_sym - 2) / 6.0f / (float)nslots;
+  if (n0_prior > 0.0f) {
+    // A tracked per-UE noise power replaces the per-subframe pre-estimate: same tiers, but the selection
+    // and the time-processing gates stop flapping with the estimate's own noise
+    n0_raw = n0_prior;
+  } else {
+    // Raw noise pre-estimate from pilot second differences, averaged over both slots
+    for (uint32_t s = 0; s < nslots; s++) {
+      const cf_t* p = &q->pilot_estimates[s * nrefs_sym];
+      cf_t*       d = q->tmp_noise; // free at this point, used as scratch
+      srsran_vec_sum_ccc(&p[0], &p[2], d, nrefs_sym - 2);
+      srsran_vec_sub_ccc(d, &p[1], d, nrefs_sym - 2);
+      srsran_vec_sub_ccc(d, &p[1], d, nrefs_sym - 2);
+      // E{|n[k-1] - 2n[k] + n[k+1]|^2} = 6*N0 for white noise
+      n0_raw += srsran_vec_avg_power_cf(d, nrefs_sym - 2) / 6.0f / (float)nslots;
+    }
   }
 
   float epre      = srsran_vec_avg_power_cf(q->pilot_recv_signal, nslots * nrefs_sym);
@@ -605,11 +625,14 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
                               const chest_ul_proc_t* proc,
                               srsran_chest_ul_res_t* res)
 {
-  // Calculate CFO
+  // Calculate CFO. With a tracked-CFO prior the raw (-pi, pi] measurement is unwrapped around the
+  // predicted cross-slot phase, extending the usable CFO range beyond +/-1 kHz; without one
+  // (cross_phase_ref = 0) this is the identity.
   float cross_phase = 0.0f;
   if (nslots == 2) {
-    cross_phase = cargf(srsran_vec_dot_prod_conj_ccc(
+    float raw   = cargf(srsran_vec_dot_prod_conj_ccc(
         &q->pilot_estimates[0 * nrefs_sym], &q->pilot_estimates[1 * nrefs_sym], nrefs_sym));
+    cross_phase = proc->cross_phase_ref + wrap_phase(raw - proc->cross_phase_ref);
     res->cfo_hz = cross_phase / (2.0f * (float)M_PI * 0.0005f);
   } else {
     res->cfo_hz = NAN;
@@ -665,7 +688,7 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
       // slot keeps its own mean phase.
       bool combined = false;
       if (proc->cross_slot_max_phase > 0.0f && nslots == 2 && !hopping &&
-          fabsf(cross_phase) < proc->cross_slot_max_phase) {
+          fabsf(cross_phase - proc->cross_phase_ref) < proc->cross_slot_max_phase) {
         cf_t* h0 = &res->ce[SRSRAN_REFSIGNAL_UL_L(0, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE +
                             n_prb[0] * SRSRAN_NRE];
         cf_t* h1 = &res->ce[SRSRAN_REFSIGNAL_UL_L(1, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE +
@@ -694,7 +717,7 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
         // channel linearly across the subframe beats holding each slot's estimate; otherwise fall back to
         // the per-slot hold (also the SRS and frequency-hopping path)
         if (proc->time_interp_max_phase > 0.0f && nslots == 2 && !hopping &&
-            fabsf(cross_phase) < proc->time_interp_max_phase) {
+            fabsf(cross_phase - proc->cross_phase_ref) < proc->time_interp_max_phase) {
           pusch_interp_pilots(q, res->ce, nrefs_sym, n_prb, cross_phase);
         } else {
           interpolate_pilots(q, res->ce, nslots, nrefs_sym, n_prb);
@@ -729,17 +752,19 @@ static void chest_ul_estimate(srsran_chest_ul_t*     q,
   res->noise_estimate_dbFs = srsran_convert_power_to_dBm(res->noise_estimate);
 }
 
-int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
-                                       srsran_ul_sf_cfg_t*    sf,
-                                       srsran_pusch_cfg_t*    cfg,
-                                       cf_t*                  input,
-                                       float                  window_delay_us,
-                                       srsran_chest_ul_res_t* res)
+int srsran_chest_ul_estimate_pusch_prior(srsran_chest_ul_t*             q,
+                                         srsran_ul_sf_cfg_t*            sf,
+                                         srsran_pusch_cfg_t*            cfg,
+                                         cf_t*                          input,
+                                         const srsran_chest_ul_prior_t* prior,
+                                         srsran_chest_ul_res_t*         res)
 {
   if (!q->dmrs_signal_configured) {
     ERROR("Error must call srsran_chest_ul_set_cfg() before using the UL estimator");
     return SRSRAN_ERROR;
   }
+
+  float window_delay_us = (prior != NULL && prior->delay_valid) ? prior->delay_us : NAN;
 
   uint32_t nof_prb = cfg->grant.L_prb;
 
@@ -810,9 +835,17 @@ int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
     }
   }
 
+  // A tracked CFO turns the cross-slot gates into deviation tests around its predicted phase: a UE with a
+  // stable frequency offset no longer loses cross-slot averaging or time interpolation to a rotation that
+  // is perfectly predictable
+  if (prior != NULL && prior->cfo_valid && !isnan(prior->cfo_hz)) {
+    proc.cross_phase_ref = 2.0f * (float)M_PI * prior->cfo_hz * 0.0005f;
+  }
+
   // Select the frequency-domain smoothing for this grant. PUCCH and SRS keep the shared legacy filter.
   if (q->pusch_opts.adaptive_smoothing || q->pusch_opts.cross_slot_avg || q->pusch_opts.time_interp) {
-    pusch_select_filter(q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF);
+    pusch_select_filter(
+        q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF, (prior != NULL && prior->n0_valid) ? prior->n0 : 0.0f);
     if (q->pusch_opts.adaptive_smoothing) {
       proc.filter      = q->pusch_filter;
       proc.filter_len  = q->pusch_filter_len;
@@ -837,9 +870,21 @@ int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
   // so the projection replaces the FIR whenever it also removes more noise: its noise gain is the
   // kept-bin fraction, the FIR's is the squared norm of its taps.
   res->delay_energy_frac = NAN;
+  res->delay_centroid_us = NAN;
+  res->delay_spread_us   = NAN;
   if (q->pusch_opts.dft_denoise && nrefs_sym >= PUSCH_DFT_MIN_NREFS) {
     uint32_t half_win = pusch_dft_half_win(nrefs_sym);
-    float    fir_gain = 0.0f;
+    // A tracked delay spread narrows the window below the blind CP/2 bound: most UEs live on channels
+    // far shorter than the CP, and every excluded bin is excluded noise. Widening above the physical
+    // bound is never allowed, and the floor keeps fractional-delay leakage covered. A wrong (too narrow)
+    // prior is caught by the energy guard below and the tracker widens fast on the reported spread.
+    // Narrowing engages only in the noise-limited regime (see PUSCH_SPREAD_NARROW_SNR_MAX).
+    if (prior != NULL && prior->spread_valid && prior->spread_us >= 0.0f &&
+        q->pusch_snr_prior < PUSCH_SPREAD_NARROW_SNR_MAX) {
+      uint32_t hw = (uint32_t)ceilf(PUSCH_BINS_PER_US(nrefs_sym) * 0.5f * prior->spread_us) + PUSCH_DFT_MARGIN_BINS;
+      half_win    = SRSRAN_MAX(PUSCH_DFT_MARGIN_BINS + 2, SRSRAN_MIN(half_win, hw));
+    }
+    float fir_gain = 0.0f;
     for (uint32_t i = 0; i < proc.filter_len; i++) {
       fir_gain += proc.filter[i] * proc.filter[i];
     }
@@ -856,9 +901,33 @@ int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
       // degrades gracefully under the same conditions.
       float total = pusch_delay_profile(q, nrefs_sym, SRSRAN_NOF_SLOTS_PER_SF);
       if (isnormal(total)) {
-        float frac = pusch_profile_window_power(q->delay_profile, nrefs_sym, 0, half_win) / total;
+        float win_power        = pusch_profile_window_power(q->delay_profile, nrefs_sym, 0, half_win);
+        float frac             = win_power / total;
         res->delay_energy_frac = frac;
-        float keep_frac        = (float)(2 * half_win + 1) / (float)nrefs_sym;
+
+        // Delay centroid and spread of the (noise-floor subtracted) in-window profile, for per-UE
+        // tracking. The floor is taken from the excluded bins, which contain only noise when the guard
+        // passes; the centroid is reported absolute (residual plus the de-rotation already applied).
+        uint32_t keep   = 2 * half_win + 1;
+        float    nfloor = (nrefs_sym > (int)keep) ? (total - win_power) / (float)(nrefs_sym - keep) : 0.0f;
+        float    wsum = 0.0f, c1 = 0.0f, c2 = 0.0f;
+        for (int o = -(int)half_win; o <= (int)half_win; o++) {
+          float p = q->delay_profile[((o % nrefs_sym) + nrefs_sym) % nrefs_sym] - nfloor;
+          if (p > 0.0f) {
+            wsum += p;
+            c1 += p * (float)o;
+            c2 += p * (float)o * (float)o;
+          }
+        }
+        if (wsum > 0.0f) {
+          float cent_bins        = c1 / wsum;
+          float var_bins         = SRSRAN_MAX(0.0f, c2 / wsum - cent_bins * cent_bins);
+          float applied_us       = proc.derot_cfo / PUSCH_BINS_PER_US(1); // slope already removed, in us
+          res->delay_centroid_us = applied_us - cent_bins / PUSCH_BINS_PER_US(nrefs_sym);
+          res->delay_spread_us   = 4.0f * sqrtf(var_bins) / PUSCH_BINS_PER_US(nrefs_sym);
+        }
+
+        float keep_frac = (float)keep / (float)nrefs_sym;
         if (frac < SRSRAN_MAX(PUSCH_DFT_GUARD_MIN_FRAC, 2.0f * keep_frac)) {
           proc.dft_half_win = 0;
           proc.filter       = q->smooth_filter; // legacy 3-tap taps: least-assumption fallback
@@ -894,13 +963,26 @@ int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
   return 0;
 }
 
+int srsran_chest_ul_estimate_pusch_win(srsran_chest_ul_t*     q,
+                                       srsran_ul_sf_cfg_t*    sf,
+                                       srsran_pusch_cfg_t*    cfg,
+                                       cf_t*                  input,
+                                       float                  window_delay_us,
+                                       srsran_chest_ul_res_t* res)
+{
+  srsran_chest_ul_prior_t prior = {};
+  prior.delay_valid             = !isnan(window_delay_us);
+  prior.delay_us                = window_delay_us;
+  return srsran_chest_ul_estimate_pusch_prior(q, sf, cfg, input, &prior, res);
+}
+
 int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                                    srsran_ul_sf_cfg_t*    sf,
                                    srsran_pusch_cfg_t*    cfg,
                                    cf_t*                  input,
                                    srsran_chest_ul_res_t* res)
 {
-  return srsran_chest_ul_estimate_pusch_win(q, sf, cfg, input, NAN, res);
+  return srsran_chest_ul_estimate_pusch_prior(q, sf, cfg, input, NULL, res);
 }
 
 int srsran_chest_ul_rank_pusch(srsran_chest_ul_t*      q,
@@ -1014,6 +1096,135 @@ void srsran_chest_ul_set_pusch_opts(srsran_chest_ul_t* q, const srsran_chest_ul_
   q->pusch_opts = *opts;
 }
 
+// Per-UE tracker tuning. Attack/decay asymmetries always err toward the safe direction: noise and spread
+// grow fast (believing an interference burst or new multipath immediately) and shrink slowly (narrowing
+// the window / trusting a low noise floor must be earned). Slew limits bound the damage of any single
+// accepted measurement.
+#define TRACK_N0_ALPHA_UP 0.5f
+#define TRACK_N0_ALPHA_DN 0.05f
+#define TRACK_CFO_ALPHA 0.2f
+#define TRACK_CFO_SLEW_HZ 30.0f
+#define TRACK_DELAY_ALPHA 0.25f
+#define TRACK_DELAY_SLEW_US 0.3f
+#define TRACK_SPREAD_ALPHA_UP 0.5f
+#define TRACK_SPREAD_ALPHA_DN 0.05f
+// Without a CRC pass, signal-dependent tracks only accept measurements at or above ~6 dB SNR (a DTX or a
+// deeply faded subframe must not steer them)
+#define TRACK_MIN_SNR_NO_CRC 4.0f
+// Updates before the signal-dependent priors are handed out
+#define TRACK_WARMUP 4
+// Priors expire when the UE has not been measured for this long (TTIs)
+#define TRACK_MAX_AGE_TTI 500
+
+/// EMA with independent attack/decay coefficients
+static inline float track_ema_asym(float ema, float meas, float a_up, float a_dn)
+{
+  float a = (meas > ema) ? a_up : a_dn;
+  return ema + a * (meas - ema);
+}
+
+/// EMA with a bound on the applied innovation
+static inline float track_ema_slew(float ema, float meas, float alpha, float slew)
+{
+  float inc = alpha * (meas - ema);
+  return ema + SRSRAN_MAX(-slew, SRSRAN_MIN(slew, inc));
+}
+
+/// TTI distance respecting the 10240 wrap-around
+static inline uint32_t track_tti_age(uint32_t now, uint32_t last)
+{
+  return (now + 10240 - last) % 10240;
+}
+
+void srsran_chest_ul_track_reset(srsran_chest_ul_track_t* t)
+{
+  bzero(t, sizeof(srsran_chest_ul_track_t));
+}
+
+void srsran_chest_ul_track_update(srsran_chest_ul_track_t*     t,
+                                  const srsran_chest_ul_res_t* res,
+                                  uint32_t                     tti,
+                                  bool                         crc_ok)
+{
+  if (t == NULL || res == NULL) {
+    return;
+  }
+
+  // A long silence means the state is stale (the UE may have moved, retuned or re-synchronized): start
+  // over rather than slew-filtering toward a possibly distant new operating point
+  if (t->init && track_tti_age(tti, t->last_tti) > TRACK_MAX_AGE_TTI) {
+    srsran_chest_ul_track_reset(t);
+  }
+
+  // Noise power updates regardless of CRC/DTX: the residual-based estimate measures the floor either way.
+  // Fast attack protects against under-estimating a starting interference burst.
+  if (isnormal(res->noise_estimate) && res->noise_estimate > 0.0f) {
+    t->n0_ema = t->init ? track_ema_asym(t->n0_ema, res->noise_estimate, TRACK_N0_ALPHA_UP, TRACK_N0_ALPHA_DN)
+                        : res->noise_estimate;
+    t->init     = true;
+    t->last_tti = tti;
+  }
+
+  // Signal-dependent tracks: require a CRC pass, or a comfortably detected signal. A missed grant (DTX)
+  // leaves noise-only "measurements" that would otherwise poison these.
+  bool signal_ok = crc_ok || (isnormal(res->snr) && res->snr >= TRACK_MIN_SNR_NO_CRC);
+  if (!signal_ok) {
+    return;
+  }
+
+  if (!isnan(res->cfo_hz)) {
+    t->cfo_hz_ema =
+        (t->nof_meas > 0) ? track_ema_slew(t->cfo_hz_ema, res->cfo_hz, TRACK_CFO_ALPHA, TRACK_CFO_SLEW_HZ)
+                          : res->cfo_hz;
+  }
+  if (!isnan(res->delay_centroid_us)) {
+    t->delay_us_ema =
+        (t->nof_meas > 0)
+            ? track_ema_slew(t->delay_us_ema, res->delay_centroid_us, TRACK_DELAY_ALPHA, TRACK_DELAY_SLEW_US)
+            : res->delay_centroid_us;
+  }
+  if (!isnan(res->delay_spread_us)) {
+    t->spread_us_ema =
+        (t->nof_meas > 0)
+            ? track_ema_asym(t->spread_us_ema, res->delay_spread_us, TRACK_SPREAD_ALPHA_UP, TRACK_SPREAD_ALPHA_DN)
+            : res->delay_spread_us;
+  }
+
+  t->nof_meas++;
+  t->last_tti = tti;
+}
+
+void srsran_chest_ul_track_notify_delay_shift(srsran_chest_ul_track_t* t, float delta_us)
+{
+  if (t != NULL && t->nof_meas > 0) {
+    t->delay_us_ema += delta_us;
+  }
+}
+
+void srsran_chest_ul_track_get_prior(const srsran_chest_ul_track_t* t, uint32_t tti, srsran_chest_ul_prior_t* prior)
+{
+  if (prior == NULL) {
+    return;
+  }
+  bzero(prior, sizeof(srsran_chest_ul_prior_t));
+  if (t == NULL || !t->init || track_tti_age(tti, t->last_tti) > TRACK_MAX_AGE_TTI) {
+    return;
+  }
+
+  if (isnormal(t->n0_ema) && t->n0_ema > 0.0f) {
+    prior->n0_valid = true;
+    prior->n0       = t->n0_ema;
+  }
+  if (t->nof_meas >= TRACK_WARMUP) {
+    prior->cfo_valid    = true;
+    prior->cfo_hz       = t->cfo_hz_ema;
+    prior->delay_valid  = true;
+    prior->delay_us     = t->delay_us_ema;
+    prior->spread_valid = true;
+    prior->spread_us    = t->spread_us_ema;
+  }
+}
+
 static float
 estimate_noise_pilots_pucch(srsran_chest_ul_t* q, cf_t* ce, uint32_t n_rs, uint32_t n_prb[SRSRAN_NOF_SLOTS_PER_SF])
 {
@@ -1052,7 +1263,9 @@ int srsran_chest_ul_estimate_pucch(srsran_chest_ul_t*     q,
     ERROR("Error computing N_rs");
     return SRSRAN_ERROR;
   }
-  res->delay_energy_frac = NAN; // PUSCH-only metric, avoid stale values in reused results
+  res->delay_energy_frac = NAN; // PUSCH-only metrics, avoid stale values in reused results
+  res->delay_centroid_us = NAN;
+  res->delay_spread_us   = NAN;
   int nrefs_sf = SRSRAN_NRE * n_rs * SRSRAN_NOF_SLOTS_PER_SF;
 
   /* Get references from the input signal */
@@ -1222,7 +1435,9 @@ int srsran_chest_ul_estimate_srs(srsran_chest_ul_t*                 q,
   // Compute least squares estimates
   srsran_vec_prod_conj_ccc(q->pilot_recv_signal, known_pilots, q->pilot_estimates, n_srs_re);
 
-  res->delay_energy_frac = NAN; // PUSCH-only metric, avoid stale values in reused results
+  res->delay_energy_frac = NAN; // PUSCH-only metrics, avoid stale values in reused results
+  res->delay_centroid_us = NAN;
+  res->delay_spread_us   = NAN;
 
   // Estimate with the legacy processing: shared filter, extrapolated edges, no PUSCH-only features
   uint32_t        n_prb[2] = {};
