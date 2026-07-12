@@ -449,6 +449,9 @@ int srsran_pusch_decode(srsran_pusch_t*        q,
     // Set max number of iterations
     srsran_sch_set_max_noi(&q->ul_sch, cfg->max_nof_iterations);
 
+    // Set the flip list decoding budget for short code blocks (0 = disabled)
+    srsran_sch_set_max_flip_attempts(&q->ul_sch, cfg->max_flip_attempts);
+
     // Decode
     ret      = srsran_ulsch_decode(&q->ul_sch, cfg, q->q, q->g, c, out->data, &out->uci);
     out->crc = (ret == 0);

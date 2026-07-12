@@ -229,6 +229,11 @@ void srsran_sch_set_max_noi(srsran_sch_t* q, uint32_t max_iterations)
   q->max_iterations = max_iterations;
 }
 
+void srsran_sch_set_max_flip_attempts(srsran_sch_t* q, uint32_t max_flip_attempts)
+{
+  q->max_flip_attempts = max_flip_attempts;
+}
+
 float srsran_sch_last_noi(srsran_sch_t* q)
 {
   return q->avg_iterations;
@@ -368,6 +373,148 @@ static int encode_tb(srsran_sch_t*           q,
   return encode_tb_off(q, soft_buffer, cb_segm, Qm, rv, nof_e_bits, data, e_bits, 0);
 }
 
+// CRC-aided flip list decoding of short code blocks, engaged only after the standard iterations fail. The
+// turbo decoder is 1-1.5 dB from maximum likelihood on short blocks; re-decoding with the least-reliable
+// information bits (by a-posteriori LLR) pinned to their flipped values recovers part of that gap, with
+// the CRC selecting the surviving candidate. Every acceptance still results from a full trellis-consistent
+// decode plus the CRC check, so the undetected-error probability per attempt equals a plain decode's; the
+// attempt budget bounds the total to <= attempts * 2^-24 per failed code block.
+#define SCH_FLIP_MAX_CB_LEN 1024 // information+CRC bits; short blocks are where the ML gap is large
+#define SCH_FLIP_NOF_POS 32      // least-reliable positions considered as flip candidates
+#define SCH_FLIP_SAT_16 4000     // pinned LLR magnitude (16-bit path): dominates without overflowing
+#define SCH_FLIP_SAT_8 100       // pinned LLR magnitude (8-bit path)
+
+/// One pinned re-decode: saturate the systematic channel LLRs at pos[] toward the flip of orig_bit[], run
+/// the full iteration loop with CRC early stopping, restore the LLRs. Returns true on CRC pass.
+static bool sch_flip_try(srsran_sch_t*           q,
+                         srsran_softbuffer_rx_t* softbuffer,
+                         int                     cb_idx,
+                         uint32_t                cb_len,
+                         uint8_t*                cb_data,
+                         srsran_crc_t*           crc_ptr,
+                         uint32_t                len_crc,
+                         uint32_t                nof_pins,
+                         const uint32_t*         pos,
+                         const uint8_t*          orig_bit)
+{
+  int16_t saved[2] = {};
+
+  // The deratematched buffer holds HARQ-combined soft bits in [sys, par0, par1] triplets: the systematic
+  // LLR of information bit i sits at index 3*i. Pins must be restored exactly, or later retransmissions
+  // would combine against a corrupted buffer.
+  for (uint32_t p = 0; p < nof_pins; p++) {
+    uint32_t idx = 3 * pos[p];
+    if (q->llr_is_8bit) {
+      int8_t* in = (int8_t*)softbuffer->buffer_f[cb_idx];
+      saved[p]   = in[idx];
+      in[idx]    = orig_bit[p] ? -SCH_FLIP_SAT_8 : SCH_FLIP_SAT_8; // APP > 0 decides bit 1
+    } else {
+      int16_t* in = softbuffer->buffer_f[cb_idx];
+      saved[p]    = in[idx];
+      in[idx]     = orig_bit[p] ? -SCH_FLIP_SAT_16 : SCH_FLIP_SAT_16;
+    }
+  }
+
+  srsran_tdec_new_cb(&q->decoder, cb_len);
+  bool     ok  = false;
+  uint32_t noi = 0;
+  do {
+    if (q->llr_is_8bit) {
+      srsran_tdec_iteration_8bit(&q->decoder, (int8_t*)softbuffer->buffer_f[cb_idx], cb_data);
+    } else {
+      srsran_tdec_iteration(&q->decoder, softbuffer->buffer_f[cb_idx], cb_data);
+    }
+    q->avg_iterations++;
+    noi++;
+    if (!srsran_crc_checksum_byte(crc_ptr, cb_data, len_crc) && noi >= SRSRAN_PDSCH_MIN_TDEC_ITERS) {
+      ok = true;
+    }
+  } while (noi < q->max_iterations && !ok);
+
+  for (uint32_t p = 0; p < nof_pins; p++) {
+    uint32_t idx = 3 * pos[p];
+    if (q->llr_is_8bit) {
+      ((int8_t*)softbuffer->buffer_f[cb_idx])[idx] = (int8_t)saved[p];
+    } else {
+      softbuffer->buffer_f[cb_idx][idx] = saved[p];
+    }
+  }
+  return ok;
+}
+
+/// Flip list decoding for one failed code block: rank information bits by |APP LLR| of the failed decode,
+/// then try single flips of the least-reliable positions followed by pairs, within the attempt budget.
+/// Deterministic (no randomness), so results are reproducible. Returns true when a candidate passes CRC.
+static bool decode_cb_flip(srsran_sch_t*           q,
+                           srsran_softbuffer_rx_t* softbuffer,
+                           int                     cb_idx,
+                           uint32_t                cb_len,
+                           uint32_t                nof_filler,
+                           uint8_t*                cb_data,
+                           srsran_crc_t*           crc_ptr,
+                           uint32_t                len_crc)
+{
+  int16_t app[SCH_FLIP_MAX_CB_LEN];
+  if (srsran_tdec_get_app(&q->decoder, app, SCH_FLIP_MAX_CB_LEN) < (int)cb_len) {
+    return false;
+  }
+
+  // Select the SCH_FLIP_NOF_POS least-reliable positions (ascending |APP|), skipping filler bits
+  uint32_t pos[SCH_FLIP_NOF_POS];
+  int32_t  mag[SCH_FLIP_NOF_POS];
+  uint32_t npos = 0;
+  for (uint32_t i = nof_filler; i < cb_len; i++) {
+    int32_t m = abs((int32_t)app[i]);
+    if (npos < SCH_FLIP_NOF_POS || m < mag[npos - 1]) {
+      uint32_t j = (npos < SCH_FLIP_NOF_POS) ? npos : (npos - 1);
+      while (j > 0 && mag[j - 1] > m) {
+        mag[j] = mag[j - 1];
+        pos[j] = pos[j - 1];
+        j--;
+      }
+      mag[j] = m;
+      pos[j] = i;
+      if (npos < SCH_FLIP_NOF_POS) {
+        npos++;
+      }
+    }
+  }
+  if (npos == 0) {
+    return false;
+  }
+
+  // The flip polarity is relative to the original failed decision (candidate re-decodes overwrite cb_data)
+  uint8_t orig[SCH_FLIP_NOF_POS];
+  for (uint32_t k = 0; k < npos; k++) {
+    orig[k] = (cb_data[pos[k] / 8] >> (7 - (pos[k] % 8))) & 1;
+  }
+
+  uint32_t attempts = 0;
+
+  // Single flips, least reliable first
+  for (uint32_t k = 0; k < npos && attempts < q->max_flip_attempts; k++, attempts++) {
+    if (sch_flip_try(q, softbuffer, cb_idx, cb_len, cb_data, crc_ptr, len_crc, 1, &pos[k], &orig[k])) {
+      return true;
+    }
+  }
+
+  // Pairs among the least-reliable positions
+  for (uint32_t j = 1; j < npos; j++) {
+    for (uint32_t i = 0; i < j; i++) {
+      if (attempts >= q->max_flip_attempts) {
+        return false;
+      }
+      attempts++;
+      uint32_t p2[2] = {pos[i], pos[j]};
+      uint8_t  o2[2] = {orig[i], orig[j]};
+      if (sch_flip_try(q, softbuffer, cb_idx, cb_len, cb_data, crc_ptr, len_crc, 2, p2, o2)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool decode_tb_cb(srsran_sch_t*           q,
                   srsran_softbuffer_rx_t* softbuffer,
                   srsran_cbsegm_t*        cb_segm,
@@ -454,6 +601,25 @@ bool decode_tb_cb(srsran_sch_t*           q,
         }
 
       } while (cb_noi < q->max_iterations && !early_stop);
+
+      // Standard decode failed: try CRC-aided flip list decoding on short code blocks (off by default)
+      if (!early_stop && q->max_flip_attempts > 0 && cb_len <= SCH_FLIP_MAX_CB_LEN) {
+        uint32_t      len_crc;
+        srsran_crc_t* crc_ptr;
+        if (cb_segm->C > 1) {
+          len_crc = cb_len;
+          crc_ptr = &q->crc_cb;
+        } else {
+          len_crc = cb_segm->tbs + 24;
+          crc_ptr = &q->crc_tb;
+        }
+        uint32_t nof_filler = (cb_idx == 0) ? cb_segm->F : 0;
+        if (decode_cb_flip(
+                q, softbuffer, cb_idx, cb_len, nof_filler, &data[cb_idx * rlen / 8], crc_ptr, len_crc)) {
+          softbuffer->cb_crc[cb_idx] = true;
+          early_stop                 = true;
+        }
+      }
 
       INFO("CB %d: rp=%d, n_e=%d, cb_len=%d, CRC=%s, rlen=%d, iterations=%d/%d",
            cb_idx,

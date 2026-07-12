@@ -65,6 +65,9 @@ typedef struct SRSRAN_API {
   srsran_pusch_grant_t    grant;
 
   uint32_t max_nof_iterations;
+  /// CRC-aided flip list decoding budget for short code blocks: extra pinned re-decodes attempted after a
+  /// failed decode (0 disables, the default). See srsran_sch_set_max_flip_attempts().
+  uint32_t max_flip_attempts;
   uint32_t last_O_cqi;
   uint32_t K_segm;
   uint32_t current_tx_nb;
