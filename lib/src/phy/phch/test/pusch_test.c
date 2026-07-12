@@ -58,6 +58,8 @@ uint32_t     mcs_idx       = 0;
 bool         enable_64_qam = false;
 bool         use_chest     = false; // decode with real DMRS channel estimation instead of an identity CE
 float        chest_snr_db  = NAN;   // add AWGN at this SNR (requires use_chest)
+uint32_t     flip_attempts = 0;     // CRC-aided flip list decoding budget for short code blocks
+float        bler_max      = NAN;   // tolerant mode: pass if the block error rate stays at or below this
 
 void usage(char* prog)
 {
@@ -88,6 +90,8 @@ void usage(char* prog)
   printf("\t\t-p use_chest (any arg): decode with DMRS channel estimation [Default %s]\n",
          use_chest ? "enabled" : "disabled");
   printf("\t\t-p snr_db <val>: add AWGN, requires use_chest [Default no noise]\n");
+  printf("\t\t-p flip <val>: flip list decoding budget for short code blocks [Default 0]\n");
+  printf("\t\t-p bler_max <val>: tolerate decode failures up to this BLER [Default all must pass]\n");
   printf("\t\t-s number of subframes [Default %d]\n", subframe);
   printf("\t-v [set srsran_verbose to debug, default none]\n");
 }
@@ -135,6 +139,10 @@ void parse_extensive_param(char* param, char* arg)
     use_chest = true;
   } else if (!strcmp(param, "snr_db")) {
     chest_snr_db = strtof(arg, NULL);
+  } else if (!strcmp(param, "flip")) {
+    flip_attempts = (uint32_t)strtol(arg, NULL, 10);
+  } else if (!strcmp(param, "bler_max")) {
+    bler_max = strtof(arg, NULL);
   } else {
     ext_code = SRSRAN_ERROR;
   }
@@ -328,9 +336,12 @@ int main(int argc, char** argv)
     }
   }
 
-  cfg.enable_64qam     = enable_64_qam;
-  uint64_t decode_us   = 0;
-  uint64_t decode_bits = 0;
+  cfg.enable_64qam      = enable_64_qam;
+  cfg.max_flip_attempts = flip_attempts;
+  uint64_t decode_us    = 0;
+  uint64_t decode_bits  = 0;
+  uint32_t nof_decoded  = 0;     // tolerant (bler_max) mode: successfully decoded subframes
+  bool undetected_error = false; // CRC pass with wrong payload: always fatal, in any mode
 
   for (int n = 0; n < subframe; n++) {
     ret = SRSRAN_SUCCESS;
@@ -408,6 +419,24 @@ int main(int argc, char** argv)
     gettimeofday(&t[1], NULL);
     int r = srsran_pusch_decode(&pusch_rx, &ul_sf, &cfg, &chest_res, sf_symbols, &pusch_res);
     gettimeofday(&t[2], NULL);
+    if (!isnan(bler_max)) {
+      // Tolerant mode: count block errors instead of failing on the first one. A CRC pass with a wrong
+      // payload is an undetected error and always fatal - this is the empirical guard on the flip
+      // decoder's false-accept analysis.
+      if (r == 0 && pusch_res.crc) {
+        if (memcmp(data_rx, data, (size_t)cfg.grant.tb.tbs / 8) != 0) {
+          printf("Undetected error: CRC passed with mismatched payload\n");
+          undetected_error = true;
+        } else {
+          nof_decoded++;
+        }
+      }
+      get_time_interval(t);
+      decode_us += t[0].tv_usec;
+      decode_bits += cfg.grant.tb.tbs;
+      continue;
+    }
+
     if (r) {
       printf("Error returned while decoding\n");
       ret = SRSRAN_ERROR;
@@ -476,6 +505,17 @@ int main(int argc, char** argv)
   }
 
   printf("Decoded Rate: %f Mbps\n", (double)decode_bits / (double)decode_us);
+
+  if (!isnan(bler_max)) {
+    float bler = 1.0f - (float)nof_decoded / (float)subframe;
+    printf("BLER: %d/%d blocks failed (%.3f, max %.3f)%s\n",
+           subframe - nof_decoded,
+           subframe,
+           bler,
+           bler_max,
+           undetected_error ? " UNDETECTED ERROR" : "");
+    ret = (!undetected_error && bler <= bler_max) ? SRSRAN_SUCCESS : SRSRAN_ERROR;
+  }
 quit:
   srsran_chest_ul_res_free(&chest_res);
   if (use_chest) {

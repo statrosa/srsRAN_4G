@@ -495,6 +495,12 @@ add_lte_test(pusch_test_chest_hop_type2 pusch_test -n 50 -R 162 -m 10 -F 3 -p us
 add_lte_test(pusch_test_chest_hop_type2_snr5 pusch_test -n 50 -R 162 -m 4 -F 3 -p use_chest 1 -p snr_db 5)
 # Wide grant decoded through the delay-domain denoising path (16QAM at 10 dB)
 add_lte_test(pusch_test_chest_16qam_L12_snr10 pusch_test -n 50 -L 12 -m 12 -p use_chest 1 -p snr_db 10)
+# CRC-aided flip list decoding of short blocks at the QPSK BLER waterfall: measured BLER 0.105 (baseline)
+# vs 0.050 (flip 64) at 0.5 dB over 200 subframes, a ~0.23 dB shift of the 10% BLER point. The flip case
+# fails without the feature; the baseline case pins the waterfall position against estimator regressions.
+# Undetected errors (CRC pass with wrong payload) are always fatal in this mode.
+add_lte_test(pusch_test_flip_stress pusch_test -n 50 -s 200 -L 4 -m 4 -p use_chest 1 -p snr_db 0.5 -p flip 64 -p bler_max 0.08)
+add_lte_test(pusch_test_bler_baseline pusch_test -n 50 -s 200 -L 4 -m 4 -p use_chest 1 -p snr_db 0.5 -p bler_max 0.16)
 
 if (${ENABLE_ALL_TEST})
   # All valid number of PRBs for PUSCH
