@@ -76,10 +76,48 @@ AWGN, 200 subframes per point, deterministic seed:
 
 The measured gain is below the literature's upper range for flip decoding (0.4–0.9 dB)
 for an honest reason: at these operating points many failures carry more than two
-channel-symbol errors, which a single/pair flip schedule cannot repair. Deeper
-schedules (triples, adaptive ordering by pairwise APP) or order-2+ OSD would close
-more of the gap at correspondingly higher budgets — the engine's schedule is the
-natural extension point.
+channel-symbol errors, which a single/pair flip schedule cannot repair. Order-2+ OSD
+would close more of the gap at correspondingly higher budgets.
+
+## Deeper schedules and larger (7–10 PRB) grants
+
+A second iteration extended the engine for larger grants (roadmap item E). The grounded
+arithmetic first: QPSK-tier 7–10 PRB grants have code blocks of 416–900 bits — already
+*inside* the original 1024-bit cap — so their limitation was schedule effectiveness,
+not eligibility; the 16QAM tier (1248–2560 bits) *was* blocked by the cap. Changes:
+
+- **Pool enlarged** 32 → 48 least-reliable positions (longer blocks spread their errors
+  over more positions).
+- **Pairs reliability-ordered**: all pool pairs scored by summed |APP| and tried
+  ascending (deterministic tie-breaks), instead of index order — the budget reaches the
+  most repairable two-error hypotheses first.
+- **Triples** among the 10 least-reliable positions (120 candidates), appended after
+  pairs.
+- **Cap raised** to 2048 bits, unblocking the 16QAM tier of 7–10 PRB grants.
+- **Negative result, reported honestly**: a cluster-aware pair ordering (grouping
+  candidate positions into trellis-error-event clusters and preferring cross-cluster
+  pairs, as SCFlip literature suggests) was implemented and measured **inert** — BLER
+  identical with and without at two 8-PRB operating points (0.065/0.065 at 1.75 dB,
+  0.195/0.195 at 1.5 dB, budget 128). It was removed; the shipped schedule contains
+  only the mechanisms that measured.
+
+Measured (200 subframes/point, real channel estimation, deterministic seed):
+
+| Case (cb_len) | SNR | Baseline | flip 64 | flip 128 |
+|---|---|---|---|---|
+| 4 PRB MCS4 (280) | 0.5 dB | 0.105 | **0.045** (was 0.050 with the v1 schedule) | 0.040 |
+| 8 PRB MCS6 (736) | 1.75 dB | 0.125 | 0.065 | **0.065** |
+| 8 PRB MCS6 (736) | 1.5 dB | 0.335 | — | 0.195 |
+| 10 PRB MCS4 (608) | 0.25 dB | 0.080 | 0.045 | **0.040** |
+| 10 PRB MCS9 (1568, was cap-blocked) | 4 dB | 0.040 | — | **0.015** |
+
+So the answer to "does flip help larger grants" is yes, measured: **BLER halves at
+8–10 PRB** exactly as it does at 4 PRB, and the previously skipped 16QAM-tier block
+sizes gain the most (2.7× at 10 PRB MCS9) — consistent with the operating-point
+argument that once link adaptation parks a UE at 1–10% BLER, failures are few-event
+and flippable regardless of block length. Budget guidance: 64 covers singles + the
+best pairs; 128 buys measurable extra reach on ≥8 PRB grants; beyond 256 the returns
+at these operating points are within measurement noise.
 
 ## Test coverage
 

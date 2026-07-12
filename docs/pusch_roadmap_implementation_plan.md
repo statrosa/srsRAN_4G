@@ -46,7 +46,7 @@ The remaining items, ordered by value-per-effort with dependencies:
 | B | Per-symbol CFO pre-compensation | 300 Hz case 0.28→~0.19; all moderate-CFO UEs | S | tracker |
 | C | eNB integration (tracker + flip knob) | unlocks A/B/D/F in the real eNB | M | — |
 | D | Iterative CE↔decode (virtual pilots) | +0.3–0.7 dB at the waterfall | M | — |
-| E | Deeper flip schedules / OSD-2 | additional ~0.1–0.3 dB of the ML gap | S | flip engine |
+| E | Deeper flip schedules — **DONE** (pool 48, scored pairs, triples, cap 2048; OSD-2 remains open) | measured: BLER halved at 8–10 PRB, 2.7× at 16QAM-tier CB sizes | S | flip engine |
 | F | Cross-TTI coefficient combining | +2–3 dB for SPS / non-adaptive HARQ retx | M | B, C |
 | G | Successive interference cancellation | 3–10 dB where interference-limited | L | C |
 

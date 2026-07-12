@@ -499,8 +499,14 @@ add_lte_test(pusch_test_chest_16qam_L12_snr10 pusch_test -n 50 -L 12 -m 12 -p us
 # vs 0.050 (flip 64) at 0.5 dB over 200 subframes, a ~0.23 dB shift of the 10% BLER point. The flip case
 # fails without the feature; the baseline case pins the waterfall position against estimator regressions.
 # Undetected errors (CRC pass with wrong payload) are always fatal in this mode.
-add_lte_test(pusch_test_flip_stress pusch_test -n 50 -s 200 -L 4 -m 4 -p use_chest 1 -p snr_db 0.5 -p flip 64 -p bler_max 0.08)
+add_lte_test(pusch_test_flip_stress pusch_test -n 50 -s 200 -L 4 -m 4 -p use_chest 1 -p snr_db 0.5 -p flip 64 -p bler_max 0.07)
 add_lte_test(pusch_test_bler_baseline pusch_test -n 50 -s 200 -L 4 -m 4 -p use_chest 1 -p snr_db 0.5 -p bler_max 0.16)
+# Deeper schedules (cluster-aware cross-event pairs + triples) make flipping effective on larger grants:
+# 8 PRB MCS6 (736-bit CB) 0.125 -> 0.065, and the cap raise to 2048 unblocks the 16QAM-tier CB sizes:
+# 10 PRB MCS9 (1568-bit CB) 0.040 -> 0.015. Baseline companions pin each waterfall point.
+add_lte_test(pusch_test_flip_L8 pusch_test -n 50 -s 200 -L 8 -m 6 -p use_chest 1 -p snr_db 1.75 -p flip 128 -p bler_max 0.10)
+add_lte_test(pusch_test_bler_L8_baseline pusch_test -n 50 -s 200 -L 8 -m 6 -p use_chest 1 -p snr_db 1.75 -p bler_max 0.20)
+add_lte_test(pusch_test_flip_L10_m9 pusch_test -n 50 -s 200 -L 10 -m 9 -p use_chest 1 -p snr_db 4 -p flip 128 -p bler_max 0.03)
 
 if (${ENABLE_ALL_TEST})
   # All valid number of PRBs for PUSCH

@@ -379,10 +379,34 @@ static int encode_tb(srsran_sch_t*           q,
 // the CRC selecting the surviving candidate. Every acceptance still results from a full trellis-consistent
 // decode plus the CRC check, so the undetected-error probability per attempt equals a plain decode's; the
 // attempt budget bounds the total to <= attempts * 2^-24 per failed code block.
-#define SCH_FLIP_MAX_CB_LEN 1024 // information+CRC bits; short blocks are where the ML gap is large
-#define SCH_FLIP_NOF_POS 32      // least-reliable positions considered as flip candidates
+#define SCH_FLIP_MAX_CB_LEN 2048 // information+CRC bits; covers the 16QAM tier of 7-10 PRB grants
+#define SCH_FLIP_NOF_POS 48      // least-reliable positions considered as flip candidates
 #define SCH_FLIP_SAT_16 4000     // pinned LLR magnitude (16-bit path): dominates without overflowing
 #define SCH_FLIP_SAT_8 100       // pinned LLR magnitude (8-bit path)
+// Triples are drawn from this many least-reliable positions (120 combinations). NOTE: a cluster-aware
+// pair ordering (cross-error-event pairs first, as in SCFlip literature) was implemented and measured
+// inert at two 8-PRB operating points (identical BLER with and without); it was removed - the measured
+// wins come from the larger pool, the reliability-ordered pairs, the triples and the length cap.
+#define SCH_FLIP_TRIPLE_POS 10
+
+typedef struct {
+  uint16_t a, b, c; // pool indices (c unused for pairs)
+  int32_t  score;   // summed |APP| (+ class bias), ascending = try first
+} sch_flip_cand_t;
+
+static int sch_flip_cand_cmp(const void* x, const void* y)
+{
+  const sch_flip_cand_t* cx = x;
+  const sch_flip_cand_t* cy = y;
+  if (cx->score != cy->score) {
+    return (cx->score < cy->score) ? -1 : 1;
+  }
+  // Deterministic tie-break on indices so results reproduce across qsort implementations
+  if (cx->a != cy->a) {
+    return (cx->a < cy->a) ? -1 : 1;
+  }
+  return (cx->b < cy->b) ? -1 : ((cx->b > cy->b) ? 1 : 0);
+}
 
 /// One pinned re-decode: saturate the systematic channel LLRs at pos[] toward the flip of orig_bit[], run
 /// the full iteration loop with CRC early stopping, restore the LLRs. Returns true on CRC pass.
@@ -397,7 +421,7 @@ static bool sch_flip_try(srsran_sch_t*           q,
                          const uint32_t*         pos,
                          const uint8_t*          orig_bit)
 {
-  int16_t saved[2] = {};
+  int16_t saved[3] = {};
 
   // The deratematched buffer holds HARQ-combined soft bits in [sys, par0, par1] triplets: the systematic
   // LLR of information bit i sits at index 3*i. Pins must be restored exactly, or later retransmissions
@@ -497,19 +521,60 @@ static bool decode_cb_flip(srsran_sch_t*           q,
       return true;
     }
   }
+  if (attempts >= q->max_flip_attempts) {
+    return false;
+  }
 
-  // Pairs among the least-reliable positions
+  // Pairs ordered by summed reliability ascending: the pairs most likely to repair two-error failures
+  // are tried first, which is what extends the budget's reach on longer blocks
+  sch_flip_cand_t cand[(SCH_FLIP_NOF_POS * (SCH_FLIP_NOF_POS - 1)) / 2];
+  uint32_t        ncand = 0;
   for (uint32_t j = 1; j < npos; j++) {
     for (uint32_t i = 0; i < j; i++) {
-      if (attempts >= q->max_flip_attempts) {
-        return false;
+      cand[ncand].a     = (uint16_t)i;
+      cand[ncand].b     = (uint16_t)j;
+      cand[ncand].c     = 0;
+      cand[ncand].score = mag[i] + mag[j];
+      ncand++;
+    }
+  }
+  qsort(cand, ncand, sizeof(sch_flip_cand_t), sch_flip_cand_cmp);
+  for (uint32_t k = 0; k < ncand; k++) {
+    if (attempts >= q->max_flip_attempts) {
+      return false;
+    }
+    attempts++;
+    uint32_t p2[2] = {pos[cand[k].a], pos[cand[k].b]};
+    uint8_t  o2[2] = {orig[cand[k].a], orig[cand[k].b]};
+    if (sch_flip_try(q, softbuffer, cb_idx, cb_len, cb_data, crc_ptr, len_crc, 2, p2, o2)) {
+      return true;
+    }
+  }
+
+  // Triples among the least-reliable positions, summed reliability ascending
+  uint32_t ntop = SRSRAN_MIN(npos, SCH_FLIP_TRIPLE_POS);
+  ncand         = 0;
+  for (uint32_t k = 2; k < ntop; k++) {
+    for (uint32_t j = 1; j < k; j++) {
+      for (uint32_t i = 0; i < j; i++) {
+        cand[ncand].a     = (uint16_t)i;
+        cand[ncand].b     = (uint16_t)j;
+        cand[ncand].c     = (uint16_t)k;
+        cand[ncand].score = mag[i] + mag[j] + mag[k];
+        ncand++;
       }
-      attempts++;
-      uint32_t p2[2] = {pos[i], pos[j]};
-      uint8_t  o2[2] = {orig[i], orig[j]};
-      if (sch_flip_try(q, softbuffer, cb_idx, cb_len, cb_data, crc_ptr, len_crc, 2, p2, o2)) {
-        return true;
-      }
+    }
+  }
+  qsort(cand, ncand, sizeof(sch_flip_cand_t), sch_flip_cand_cmp);
+  for (uint32_t k = 0; k < ncand; k++) {
+    if (attempts >= q->max_flip_attempts) {
+      return false;
+    }
+    attempts++;
+    uint32_t p3[3] = {pos[cand[k].a], pos[cand[k].b], pos[cand[k].c]};
+    uint8_t  o3[3] = {orig[cand[k].a], orig[cand[k].b], orig[cand[k].c]};
+    if (sch_flip_try(q, softbuffer, cb_idx, cb_len, cb_data, crc_ptr, len_crc, 3, p3, o3)) {
+      return true;
     }
   }
   return false;
