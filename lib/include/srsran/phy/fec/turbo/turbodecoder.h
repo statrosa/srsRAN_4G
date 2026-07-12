@@ -106,6 +106,14 @@ SRSRAN_API int srsran_tdec_new_cb(srsran_tdec_t* h, uint32_t long_cb);
 
 SRSRAN_API int srsran_tdec_get_nof_iterations(srsran_tdec_t* h);
 
+/**
+ * Copies the a-posteriori LLRs of the information bits from the last iteration into app, in natural bit
+ * order with the same convention as the hard decision (positive = bit 1). Valid after at least one
+ * iteration of the current code block. Returns the number of LLRs written, or
+ * SRSRAN_ERROR_INVALID_INPUTS.
+ */
+SRSRAN_API int srsran_tdec_get_app(srsran_tdec_t* h, int16_t* app, uint32_t max_len);
+
 SRSRAN_API uint32_t srsran_tdec_autoimp_get_subblocks(uint32_t long_cb);
 
 SRSRAN_API uint32_t srsran_tdec_autoimp_get_subblocks_8bit(uint32_t long_cb);

@@ -54,6 +54,10 @@ typedef struct SRSRAN_API {
   uint32_t max_iterations;
   float    avg_iterations;
 
+  /// CRC-aided flip list decoding budget for short code blocks (0 disables, the default): on a failed
+  /// decode, up to this many re-decodes with least-reliable information bits pinned to flipped values
+  uint32_t max_flip_attempts;
+
   bool llr_is_8bit;
 
   /* buffers */
@@ -78,6 +82,14 @@ SRSRAN_API int srsran_sch_init(srsran_sch_t* q);
 SRSRAN_API void srsran_sch_free(srsran_sch_t* q);
 
 SRSRAN_API void srsran_sch_set_max_noi(srsran_sch_t* q, uint32_t max_iterations);
+
+/**
+ * Sets the CRC-aided flip list decoding budget (see srsran_sch_t.max_flip_attempts). Every accepted
+ * candidate results from a full turbo decode plus the CRC check, so the undetected-error probability per
+ * attempt is the same as a plain decode; the budget bounds the total to <= attempts * 2^-24 per failed
+ * code block. 0 (default) disables the feature entirely.
+ */
+SRSRAN_API void srsran_sch_set_max_flip_attempts(srsran_sch_t* q, uint32_t max_flip_attempts);
 
 SRSRAN_API float srsran_sch_last_noi(srsran_sch_t* q);
 

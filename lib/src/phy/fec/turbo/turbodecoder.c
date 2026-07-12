@@ -377,6 +377,23 @@ static void tdec_decision_byte(srsran_tdec_t* h, uint8_t* output)
   }
 }
 
+int srsran_tdec_get_app(srsran_tdec_t* h, int16_t* app, uint32_t max_len)
+{
+  if (h == NULL || app == NULL || h->current_cbidx < 0 || h->n_iter < 1 || h->current_long_cb > max_len) {
+    return SRSRAN_ERROR_INVALID_INPUTS;
+  }
+  // Mirror exactly the buffer tdec_decision_byte sliced the last hard decision from
+  if (h->current_llr_type == SRSRAN_TDEC_16) {
+    memcpy(app, !(h->n_iter % 2) ? h->app1 : h->ext1, h->current_long_cb * sizeof(int16_t));
+  } else {
+    const int8_t* src = !(h->n_iter % 2) ? (int8_t*)h->app1 : (int8_t*)h->ext1;
+    for (uint32_t i = 0; i < h->current_long_cb; i++) {
+      app[i] = src[i];
+    }
+  }
+  return (int)h->current_long_cb;
+}
+
 /* Returns number of subblocks in automatic mode for this long_cb */
 uint32_t srsran_tdec_autoimp_get_subblocks(uint32_t long_cb)
 {
