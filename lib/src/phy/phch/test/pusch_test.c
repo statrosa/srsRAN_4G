@@ -58,6 +58,9 @@ uint32_t     mcs_idx       = 0;
 bool         enable_64_qam = false;
 bool         use_chest     = false; // decode with real DMRS channel estimation instead of an identity CE
 float        chest_snr_db  = NAN;   // add AWGN at this SNR (requires use_chest)
+float        chest_cfo_hz  = 0.0f;  // residual CFO: common phase ramp across SC-FDMA symbols (requires use_chest)
+float        burst_inr_db  = NAN;   // async interference burst: extra noise on symbols 5-9 at this INR (requires snr_db)
+bool         burst_genie   = false; // genie per-symbol LLR weighting: downscale burst symbols by N0/N_l
 uint32_t     flip_attempts = 0;     // CRC-aided flip list decoding budget for short code blocks
 float        bler_max      = NAN;   // tolerant mode: pass if the block error rate stays at or below this
 
@@ -90,6 +93,9 @@ void usage(char* prog)
   printf("\t\t-p use_chest (any arg): decode with DMRS channel estimation [Default %s]\n",
          use_chest ? "enabled" : "disabled");
   printf("\t\t-p snr_db <val>: add AWGN, requires use_chest [Default no noise]\n");
+  printf("\t\t-p cfo_hz <val>: residual CFO as per-symbol common phase ramp, requires use_chest [Default 0]\n");
+  printf("\t\t-p burst_inr_db <val>: async interference burst on symbols 5-9 at INR dB over the thermal floor, requires snr_db [Default off]\n");
+  printf("\t\t-p burst_genie: genie per-symbol LLR weighting of the burst symbols (ceiling measurement) [Default off]\n");
   printf("\t\t-p flip <val>: flip list decoding budget for short code blocks [Default 0]\n");
   printf("\t\t-p bler_max <val>: tolerate decode failures up to this BLER [Default all must pass]\n");
   printf("\t\t-s number of subframes [Default %d]\n", subframe);
@@ -139,6 +145,12 @@ void parse_extensive_param(char* param, char* arg)
     use_chest = true;
   } else if (!strcmp(param, "snr_db")) {
     chest_snr_db = strtof(arg, NULL);
+  } else if (!strcmp(param, "cfo_hz")) {
+    chest_cfo_hz = strtof(arg, NULL);
+  } else if (!strcmp(param, "burst_inr_db")) {
+    burst_inr_db = strtof(arg, NULL);
+  } else if (!strcmp(param, "burst_genie")) {
+    burst_genie = true;
   } else if (!strcmp(param, "flip")) {
     flip_attempts = (uint32_t)strtol(arg, NULL, 10);
   } else if (!strcmp(param, "bler_max")) {
@@ -400,9 +412,37 @@ int main(int argc, char** argv)
         }
       }
 
+      if (chest_cfo_hz != 0.0f) {
+        // Residual CFO modelled as the per-symbol common phase ramp (ICI neglected: at a few
+        // hundred Hz it is ~40 dB below the carrier and irrelevant next to the rotation).
+        for (uint32_t l = 0; l < 2 * SRSRAN_CP_NSYMB(cell.cp); l++) {
+          float t_l = (float)l / (2.0f * SRSRAN_CP_NSYMB(cell.cp)) * 1e-3f;
+          cf_t  rot = cexpf(I * 2.0f * (float)M_PI * chest_cfo_hz * t_l);
+          srsran_vec_sc_prod_ccc(&sf_symbols[l * SRSRAN_NRE * cell.nof_prb], rot,
+                                 &sf_symbols[l * SRSRAN_NRE * cell.nof_prb], SRSRAN_NRE * cell.nof_prb);
+        }
+      }
+
       if (!isnan(chest_snr_db)) {
         // PUSCH and DMRS REs have unit average power
         srsran_ch_awgn_c(sf_symbols, sf_symbols, srsran_convert_dB_to_power(-chest_snr_db), nof_re);
+      }
+
+      if (!isnan(burst_inr_db) && !isnan(chest_snr_db)) {
+        // Asynchronous interference burst: extra noise at INR dB (relative to the thermal floor)
+        // on symbols 5-9 only. Straddles the slot boundary but avoids both DMRS symbols (3, 10),
+        // so a DMRS-derived noise estimate cannot see it.
+        float n_burst = srsran_convert_dB_to_power(-chest_snr_db + burst_inr_db);
+        for (uint32_t l = 5; l <= 9; l++) {
+          cf_t* sym = &sf_symbols[l * SRSRAN_NRE * cell.nof_prb];
+          srsran_ch_awgn_c(sym, sym, n_burst, SRSRAN_NRE * cell.nof_prb);
+          if (burst_genie) {
+            // Emulate ideal per-symbol LLR weighting: for a linear demapper, scaling the
+            // received symbol by N0/N_l scales its LLRs by the correct inverse-variance weight.
+            float g = 1.0f / (1.0f + srsran_convert_dB_to_power(burst_inr_db));
+            srsran_vec_sc_prod_cfc(sym, g, sym, SRSRAN_NRE * cell.nof_prb);
+          }
+        }
       }
 
       if (srsran_chest_ul_estimate_pusch(&chest, &ul_sf, &cfg, sf_symbols, &chest_res)) {
