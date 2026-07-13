@@ -242,6 +242,8 @@ typedef struct {
   bool         trunc_edges;          // true: truncate+renormalize at band edges; false: linear extrapolation
   uint32_t     dft_half_win;         // >0: smooth by projecting onto the delay bins |d| <= dft_half_win
                                      // (2*dft_half_win+1 bins total) instead of applying the FIR filter
+  const float* dft_weights;          // optional per-bin soft-threshold Wiener weights applied inside the
+                                     // window (indexed by circular bin, NULL = plain hard window)
   float        derot_cfo;            // pilot phase slope removed before smoothing, in normalized frequency
                                      // units (cycles/sample); re-applied to the estimates (0 disables)
   float        cross_slot_max_phase; // cross-slot averaging gate in radians (0 disables)
@@ -312,11 +314,21 @@ static float estimate_noise_pilots(srsran_chest_ul_t*     q,
           nrefs);
     }
     power /= nslots;
-    // The delay-domain smoother is an orthogonal projection, so the residual contains exactly the noise
-    // that fell in the discarded bins: the bias factor is the discarded fraction, with no edge effects
+    // The delay-domain smoother is a diagonal operator in the delay basis: the expected residual noise
+    // fraction is sum((1-w_d)^2)/nrefs, with w = 0 for the discarded bins (reducing to the projection's
+    // exact discarded fraction when no soft weights are applied)
     uint32_t keep = 2 * proc->dft_half_win + 1;
-    if (keep < nrefs) {
-      return power * (float)nrefs / (float)(nrefs - keep);
+    double   acc  = (double)(nrefs > keep ? nrefs - keep : 0);
+    if (proc->dft_weights != NULL) {
+      for (int o = -(int)proc->dft_half_win; o <= (int)proc->dft_half_win; o++) {
+        int    d = ((o % (int)nrefs) + (int)nrefs) % (int)nrefs;
+        double r = 1.0 - proc->dft_weights[d];
+        acc += r * r;
+      }
+    }
+    float bias = (float)(acc / nrefs);
+    if (isnormal(bias)) {
+      return power / bias;
     }
     return power;
   }
@@ -406,9 +418,16 @@ static void average_pilots(srsran_chest_ul_t*     q,
     cf_t* out = &ce[SRSRAN_REFSIGNAL_UL_L(i, q->cell.cp) * q->cell.nof_prb * SRSRAN_NRE + n_prb[i] * SRSRAN_NRE];
     if (proc->dft_half_win > 0) {
       // Delay-domain projection: any within-CP channel lives in the kept bins (TA de-rotation centered the
-      // mean delay at bin 0), so it passes undistorted while the noise of the discarded bins is removed
+      // mean delay at bin 0), so it passes undistorted while the noise of the discarded bins is removed.
+      // With soft-threshold weights, the empty bins INSIDE the window are attenuated too.
       cf_t* delay = q->tmp_noise; // scratch, free at this point
       srsran_dft_run_c(&q->dft_fwd, &input[i * nrefs], delay);
+      if (proc->dft_weights != NULL) {
+        for (int o = -(int)proc->dft_half_win; o <= (int)proc->dft_half_win; o++) {
+          int d = ((o % (int)nrefs) + (int)nrefs) % (int)nrefs;
+          delay[d] *= proc->dft_weights[d];
+        }
+      }
       srsran_vec_cf_zero(&delay[proc->dft_half_win + 1], nrefs - 2 * proc->dft_half_win - 1);
       srsran_dft_run_c(&q->dft_bwd, delay, out);
     } else if (proc->trunc_edges) {
@@ -443,11 +462,15 @@ static void average_pilots(srsran_chest_ul_t*     q,
 // pre-estimate cannot weaken it. A miss means the window does not contain the channel (or the pilots are
 // too distorted to tell) and the projection must yield to a short FIR.
 #define PUSCH_DFT_GUARD_MIN_FRAC 0.25f
-// Spread-prior window narrowing pays only in the noise-limited regime: the saved noise scales with N0
-// while the fractional-delay sinc leakage the narrower window cuts off scales with the channel power.
-// Measured on flat channels: a clear win at <= 3 dB, a wash by 5 dB - so it engages with the same
-// threshold as the widest smoothing tier, keeping "smooth as hard as physics allows" one consistent regime
-#define PUSCH_SPREAD_NARROW_SNR_MAX PUSCH_SMOOTH_SNR_LOW
+// Soft-threshold Wiener weighting of the delay window: in-window bins whose measured power stays below
+// this multiple of the per-bin noise floor are zeroed (they carry no detectable channel), the rest get the
+// spectral-subtraction gain 1 - nfloor/power (= P/(P+N)). Zeroing can only discard a tap weaker than
+// alpha*nfloor, so the worst-case bias scales with NOISE, not signal power - valid at every SNR with no
+// gate, unlike the window-narrowing it supersedes (whose edge clipped strong-tap leakage, bias ~ S).
+#define PUSCH_WIEN_ALPHA 2.5f
+// Bins adjacent (within this distance) to an above-threshold bin also pass: the leakage of a
+// fractional-delay tap lives there and clipping it would trade noise for signal bias
+#define PUSCH_WIEN_DILATE_BINS 2
 
 // Delay bins per micro-second of a nrefs-point pilot DFT (15 kHz subcarrier spacing)
 #define PUSCH_BINS_PER_US(nrefs) (15e3f * 1e-6f * (float)(nrefs))
@@ -874,17 +897,7 @@ int srsran_chest_ul_estimate_pusch_prior(srsran_chest_ul_t*             q,
   res->delay_spread_us   = NAN;
   if (q->pusch_opts.dft_denoise && nrefs_sym >= PUSCH_DFT_MIN_NREFS) {
     uint32_t half_win = pusch_dft_half_win(nrefs_sym);
-    // A tracked delay spread narrows the window below the blind CP/2 bound: most UEs live on channels
-    // far shorter than the CP, and every excluded bin is excluded noise. Widening above the physical
-    // bound is never allowed, and the floor keeps fractional-delay leakage covered. A wrong (too narrow)
-    // prior is caught by the energy guard below and the tracker widens fast on the reported spread.
-    // Narrowing engages only in the noise-limited regime (see PUSCH_SPREAD_NARROW_SNR_MAX).
-    if (prior != NULL && prior->spread_valid && prior->spread_us >= 0.0f &&
-        q->pusch_snr_prior < PUSCH_SPREAD_NARROW_SNR_MAX) {
-      uint32_t hw = (uint32_t)ceilf(PUSCH_BINS_PER_US(nrefs_sym) * 0.5f * prior->spread_us) + PUSCH_DFT_MARGIN_BINS;
-      half_win    = SRSRAN_MAX(PUSCH_DFT_MARGIN_BINS + 2, SRSRAN_MIN(half_win, hw));
-    }
-    float fir_gain = 0.0f;
+    float    fir_gain = 0.0f;
     for (uint32_t i = 0; i < proc.filter_len; i++) {
       fir_gain += proc.filter[i] * proc.filter[i];
     }
@@ -933,6 +946,44 @@ int srsran_chest_ul_estimate_pusch_prior(srsran_chest_ul_t*             q,
           proc.filter       = q->smooth_filter; // legacy 3-tap taps: least-assumption fallback
           proc.filter_len   = q->smooth_filter_len;
           proc.trunc_edges  = true;
+        } else {
+          // Soft-threshold Wiener weights for the in-window bins, computed from this subframe's own
+          // profile and noise floor (no cross-transmission state): empty bins inside the window are
+          // zeroed, occupied ones get the P/(P+N) shrinkage. Two protections make this unbiased in
+          // practice: the pass mask is dilated by +-2 bins (the sinc leakage of fractional-delay taps
+          // concentrates next to occupied bins and must not be clipped), and a self-gate applies the
+          // weights only when the noise they remove exceeds the channel energy they clip - both sides
+          // measured from the profile itself, so no SNR heuristic is needed. The profile buffer is
+          // converted in place; its other consumers (guard, centroid, spread) are done at this point.
+          uint32_t width = 2 * half_win + 1;
+          uint8_t  mask[2 * 64 + 1]; // half_win = ceil(0.03525*nrefs)+3 <= 46 for nrefs <= 1200
+          if (width <= sizeof(mask)) {
+            for (uint32_t o = 0; o < width; o++) {
+              int d   = (((int)o - (int)half_win) % nrefs_sym + nrefs_sym) % nrefs_sym;
+              mask[o] = (q->delay_profile[d] > PUSCH_WIEN_ALPHA * nfloor) ? 1 : 0;
+            }
+            float noise_saved = 0.0f;
+            float sig_clipped = 0.0f;
+            for (uint32_t o = 0; o < width; o++) {
+              int  d       = (((int)o - (int)half_win) % nrefs_sym + nrefs_sym) % nrefs_sym;
+              bool dilated = false;
+              for (int g = -PUSCH_WIEN_DILATE_BINS; g <= PUSCH_WIEN_DILATE_BINS && !dilated; g++) {
+                int og  = (int)o + g;
+                dilated = (og >= 0 && og < (int)width && mask[og]);
+              }
+              float p = q->delay_profile[d];
+              if (dilated && p > nfloor) {
+                q->delay_profile[d] = 1.0f - nfloor / p;
+              } else {
+                q->delay_profile[d] = 0.0f;
+                noise_saved += nfloor;
+                sig_clipped += SRSRAN_MAX(0.0f, p - nfloor);
+              }
+            }
+            if (sig_clipped < 0.5f * noise_saved) {
+              proc.dft_weights = q->delay_profile;
+            }
+          }
         }
       } else {
         // No measurable pilot energy: nothing for the projection to protect, use the FIR path

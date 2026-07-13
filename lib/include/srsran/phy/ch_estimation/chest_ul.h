@@ -87,8 +87,9 @@ typedef struct SRSRAN_API {
   float delay_us; ///< Tracked delay centroid: centers the delay window (same mechanism as
                   ///< srsran_chest_ul_estimate_pusch_win)
   bool  spread_valid;
-  float spread_us; ///< Tracked delay spread: narrows the projection window below the blind CP/2 bound,
-                   ///< increasing denoising for short-delay-spread channels
+  float spread_us; ///< Tracked delay spread. Diagnostic only: no longer consumed by the estimator, whose
+                   ///< per-subframe soft-threshold Wiener weighting of the delay window supersedes the
+                   ///< spread-based narrowing (adaptive per bin, no cross-transmission state needed)
 } srsran_chest_ul_prior_t;
 
 /**

@@ -152,7 +152,13 @@ of re-learning it through the slew filter.
 
 **Filter**: EMA `α=0.25`, slew ±0.3 µs per update.
 
-### 3.4 `spread_us` — tracked delay spread → SNR-gated window narrowing
+### 3.4 `spread_us` — tracked delay spread (SUPERSEDED as an estimator input)
+
+> **Status update:** the spread-based window narrowing described below has been
+> superseded by the per-subframe soft-threshold Wiener weighting of the delay window
+> (see `pusch_wiener_weighting.md`), which achieves the same gains statelessly — no
+> warm tracker required — and removes the ~5 dB gate. `spread_us` remains tracked and
+> reported as a diagnostic. Kept for the design record:
 
 **Consumed in** the projection-window sizing:
 `half_win = clamp(ceil(bins_per_µs · spread/2) + margin, margin+2, blind CP/2 bound)` —

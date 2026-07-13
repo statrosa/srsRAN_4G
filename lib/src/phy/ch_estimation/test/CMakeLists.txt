@@ -97,11 +97,17 @@ add_lte_test(chest_test_ul_sweep_to12_nonoise chest_test_ul -r 50 -L 12 -t 12 -W
 # projection deletes the channel: NMSE 9.9, noise estimate +10.8 dB)
 add_lte_test(chest_test_ul_center_correct chest_test_ul -r 50 -L 25 -s 10 -t 5.0 -w 5.0 -N 100 -M 0.10 -E 0.5)
 add_lte_test(chest_test_ul_center_guard chest_test_ul -r 50 -L 25 -s 10 -t 5.0 -w 0 -N 100 -M 0.30 -E 1.0)
+# Per-subframe soft-threshold Wiener weighting of the delay window (stateless, no tracker): empty
+# in-window bins are zeroed with a +-2 bin leakage dilation and a measured self-gate. All thresholds fail
+# against the hard window (0.056/0.117/0.055 at flat-0dB/flat-20dB/two-path-0dB respectively).
+add_lte_test(chest_test_ul_wiener_flat0 chest_test_ul -r 50 -L 25 -s 0 -N 200 -M 0.05 -E 0.5)
+add_lte_test(chest_test_ul_wiener_flat20 chest_test_ul -r 50 -L 25 -s 20 -N 200 -M 0.06 -E 0.5)
+add_lte_test(chest_test_ul_wiener_2path chest_test_ul -r 50 -L 25 -s 0 -P 1.5,3 -N 200 -M 0.05 -E 0.5)
 # Per-UE tracking (-T): link priors (noise, CFO, delay centroid/spread) filtered across subframes and fed
-# back. Window narrowing earns -1.9 dB at 0 dB and is SNR-gated (bit-exact parity at 10 dB); a tracked CFO
-# turns the cross-slot/interp gates into deviation tests (300 Hz: 0.37 -> 0.28; the selective time-drift
-# case becomes deterministic: 4.2 -> 0.32); -D injects DTX every 4th subframe, which must not poison
-# anything (thresholds identical to the DTX-free case)
+# back. A tracked CFO turns the cross-slot/interp gates into deviation tests (300 Hz: 0.37 -> 0.28; the
+# selective time-drift case becomes deterministic: 4.2 -> 0.32); -D injects DTX every 4th subframe, which
+# must not poison anything (thresholds identical to the DTX-free case). The spread-based window narrowing
+# these once exercised is superseded by the per-subframe Wiener weighting above (tracker-independent).
 add_lte_test(chest_test_ul_track_prb25_snr0 chest_test_ul -r 50 -L 25 -s 0 -T -N 200 -M 0.05 -E 0.5)
 add_lte_test(chest_test_ul_track_parity_snr10 chest_test_ul -r 50 -L 25 -s 10 -T -N 200 -M 0.10 -E 0.5)
 add_lte_test(chest_test_ul_track_dtx chest_test_ul -r 50 -L 25 -s 3 -T -D -N 200 -M 0.075 -E 0.5)

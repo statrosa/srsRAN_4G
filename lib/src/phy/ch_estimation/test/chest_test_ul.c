@@ -49,6 +49,8 @@ static uint32_t nof_sf           = 100;      // subframes to average metrics ove
 static bool     selective_chan   = false;    // frequency-selective, time-varying channel
 static float    cfo_hz           = 0.0f;     // carrier frequency offset emulated per symbol
 static float    timing_off_us    = 0.0f;     // timing offset emulated as a phase ramp across frequency
+static float    p2_delay_us      = 0.0f;     // second propagation path: delay in micro-seconds
+static float    p2_rel_db        = NAN;      // second propagation path: relative attenuation in dB (NAN=off)
 static float    win_center_us    = NAN;      // explicit window center for the centered-estimate API
 static bool     sweep_mode       = false;    // rank a coarse timing sweep, then centered-estimate the winner
 static bool     track_mode       = false;    // maintain a per-UE tracker across subframes and feed priors back
@@ -78,6 +80,7 @@ void usage(char* prog)
   printf("\t-S frequency-selective time-varying channel (quality mode) [Default flat]\n");
   printf("\t-f cfo_hz: emulate CFO (quality mode) [Default 0]\n");
   printf("\t-t to_us: emulate timing offset in micro-seconds (quality mode) [Default 0]\n");
+  printf("\t-P delay_us,rel_db: add a second propagation path (quality mode) [Default off]\n");
   printf("\t-w center_us: use the centered-window estimate API with this center (quality mode)\n");
   printf("\t-W emulate a coarse timing sweep: rank candidates, centered-estimate the winner\n");
   printf("\t-T per-UE tracking: maintain link priors across subframes and feed them back\n");
@@ -92,7 +95,7 @@ void usage(char* prog)
 void parse_args(int argc, char** argv)
 {
   int opt;
-  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:t:w:WTDM:E:v")) != -1) {
+  while ((opt = getopt(argc, argv, "r:ec:o:L:s:HN:Sf:t:P:w:WTDM:E:v")) != -1) {
     switch (opt) {
       case 'r':
         cell.nof_prb = (uint32_t)strtol(optarg, NULL, 10);
@@ -123,6 +126,12 @@ void parse_args(int argc, char** argv)
         break;
       case 't':
         timing_off_us = strtof(optarg, NULL);
+        break;
+      case 'P':
+        if (sscanf(optarg, "%f,%f", &p2_delay_us, &p2_rel_db) != 2) {
+          usage(argv[0]);
+          exit(-1);
+        }
         break;
       case 'w':
         win_center_us = strtof(optarg, NULL);
@@ -171,6 +180,13 @@ static cf_t channel_gain(uint32_t l, uint32_t k, float sf_phase)
     // One subframe (1 ms) spans 2*nsymb symbols; approximate each symbol as equally spaced in time
     float t = (float)l * 1e-3f / (2.0f * SRSRAN_CP_NSYMB(cell.cp));
     h *= cexpf(I * 2.0f * M_PI * cfo_hz * t);
+  }
+  if (!isnan(p2_rel_db)) {
+    // Two-path channel: second time-invariant path at p2_delay_us with relative attenuation p2_rel_db and
+    // a fixed phase offset; total power normalized to keep the SNR definition unchanged
+    float a2 = powf(10.0f, -p2_rel_db / 20.0f);
+    cf_t  p2 = a2 * cexpf(I * (1.234f - 2.0f * M_PI * 15e3f * p2_delay_us * 1e-6f * (float)k));
+    h        = (h + h * p2) / sqrtf(1.0f + a2 * a2);
   }
   if (timing_off_us != 0.0f) {
     // A propagation delay of to_us rotates subcarrier k by e^{-j*2pi*15kHz*to*k} (late UE, positive TA)

@@ -42,7 +42,7 @@ The remaining items, ordered by value-per-effort with dependencies:
 
 | # | Item | Expected gain | Effort | Depends on |
 |---|---|---|---|---|
-| A | Wiener PDP delay-domain weighting | +0.5–1 dB CE at low SNR; retires the narrowing gate | S | tracker |
+| A | Wiener delay-domain weighting — **DONE**, redesigned tracker-free after field feedback (per-subframe soft threshold + dilation + measured self-gate; see pusch_wiener_weighting.md) | measured: flat 20 dB 0.117→0.042, 0 dB 0.056→0.037, no tracker needed | S | — |
 | B | Per-symbol CFO pre-compensation | 300 Hz case 0.28→~0.19; all moderate-CFO UEs | S | tracker |
 | C | eNB integration (tracker + flip knob) | unlocks A/B/D/F in the real eNB | M | — |
 | D | Iterative CE↔decode (virtual pilots) | +0.3–0.7 dB at the waterfall | M | — |
