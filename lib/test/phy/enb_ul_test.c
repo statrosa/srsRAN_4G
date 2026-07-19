@@ -183,6 +183,16 @@ static int run_pusch_test(uint32_t  nof_rx_antennas,
     TESTASSERT(fabsf(enb_ul.chest_res.ta_us) < 1.0f);
   }
 
+  // A failed channel estimation must never leave a stale covariance flagged valid
+  if (irc_enable && nof_rx_antennas == 2) {
+    srsran_pusch_cfg_t bad_cfg = {};
+    bad_cfg.grant              = ue_ul_cfg.ul_cfg.pusch.grant;
+    bad_cfg.grant.L_prb        = 7; // not a valid DFT-precoding size
+    TESTASSERT(srsran_chest_ul_estimate_pusch(&enb_ul.chest, &ul_sf, &bad_cfg, enb_ul.sf_symbols,
+                                              &enb_ul.chest_res) < SRSRAN_SUCCESS);
+    TESTASSERT(!enb_ul.chest_res.noise_cov_valid);
+  }
+
   *avg_snr_db = (snr_cnt > 0) ? (snr_acc / snr_cnt) : NAN;
 
   ret = SRSRAN_SUCCESS;

@@ -53,6 +53,20 @@ int prach_worker::init(const srsran_cell_t&      cell_,
 
   nof_sf = (uint32_t)ceilf(prach.T_tot * 1000);
 
+  // Pre-size the per-antenna sample buffers of the whole pool here so that new_tti(), which runs on the
+  // time-critical RX thread, never has to allocate
+  {
+    std::vector<sf_buffer*> prealloc;
+    prealloc.reserve(buffer_pool.nof_available_pdus());
+    for (sf_buffer* b = buffer_pool.allocate(); b != nullptr; b = buffer_pool.allocate()) {
+      b->ensure_antennas(nof_rx_ant);
+      prealloc.push_back(b);
+    }
+    for (sf_buffer* b : prealloc) {
+      buffer_pool.deallocate(b);
+    }
+  }
+
   if (nof_workers > 0) {
     start(priority);
   }

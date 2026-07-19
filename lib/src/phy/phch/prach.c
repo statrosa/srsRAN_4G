@@ -1017,6 +1017,11 @@ int srsran_prach_detect_offset_multi(srsran_prach_t* p,
 
     // Successive cancellation reconstructs and subtracts in a single set of bins; restrict it to one antenna
     if (p->successive_cancellation && nof_rx_antennas > 1) {
+      static bool warned = false; // diagnostics only, races are harmless
+      if (!warned) {
+        warned = true;
+        INFO("PRACH: successive cancellation enabled, restricting detection to 1 of %d RX antennas", nof_rx_antennas);
+      }
       nof_rx_antennas = 1;
     }
 

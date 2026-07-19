@@ -519,6 +519,9 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
                                    cf_t*                  input[SRSRAN_MAX_PORTS],
                                    srsran_chest_ul_res_t* res)
 {
+  // Invalidate the covariance first so no error path can leave a stale estimate flagged valid
+  res->noise_cov_valid = false;
+
   if (!q->dmrs_signal_configured) {
     ERROR("Error must call srsran_chest_ul_set_cfg() before using the UL estimator");
     return SRSRAN_ERROR;
@@ -536,8 +539,6 @@ int srsran_chest_ul_estimate_pusch(srsran_chest_ul_t*     q,
 
   uint32_t            nof_antennas             = SRSRAN_MAX(1, res->nof_rx_antennas);
   chest_ul_ant_meas_t meas[SRSRAN_MAX_PORTS]   = {};
-
-  res->noise_cov_valid = false;
 
   for (uint32_t a = 0; a < nof_antennas; a++) {
     if (input[a] == NULL) {

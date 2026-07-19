@@ -446,8 +446,9 @@ int srsran_pusch_decode(srsran_pusch_t*        q,
       if (q->irc_enable && nof_rx_antennas == 2) {
         // Not silent: IRC was requested but the estimator could not produce a usable covariance
         static uint32_t irc_fallback_count = 0; // diagnostics only, races are harmless
-        if (irc_fallback_count++ % 100 == 0) {
-          INFO("PUSCH IRC: falling back to MRC, no valid noise covariance (count=%u)", irc_fallback_count + 1);
+        uint32_t count = ++irc_fallback_count;
+        if ((count - 1) % 100 == 0) {
+          INFO("PUSCH IRC: falling back to MRC, no valid noise covariance (count=%u)", count);
         }
       }
       srsran_predecoding_single_multi(

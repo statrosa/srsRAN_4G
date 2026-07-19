@@ -291,7 +291,10 @@ int srsran_enb_ul_get_pusch(srsran_enb_ul_t*    q,
                             srsran_pusch_cfg_t* cfg,
                             srsran_pusch_res_t* res)
 {
-  srsran_chest_ul_estimate_pusch(&q->chest, ul_sf, cfg, q->sf_symbols, &q->chest_res);
+  if (srsran_chest_ul_estimate_pusch(&q->chest, ul_sf, cfg, q->sf_symbols, &q->chest_res) < SRSRAN_SUCCESS) {
+    ERROR("Error estimating PUSCH channel");
+    return SRSRAN_ERROR;
+  }
 
   return srsran_pusch_decode(&q->pusch, ul_sf, cfg, &q->chest_res, q->sf_symbols, res);
 }
