@@ -259,10 +259,15 @@ Asserts (all passing):
 - Low SNR (MCS16 @ 6 dB): 1 RX decodes **0/10** transport blocks, 2 RX
   decodes **10/10** (8.5 vs 11.5 dB reported).
 - |TA| < 1 µs throughout.
+- Negative case: after a successful 2 RX IRC run, a deliberately invalid
+  grant (`L_prb = 7`, not a DFT-precoding size) must make
+  `srsran_chest_ul_estimate_pusch` return an error **and** leave
+  `noise_cov_valid == false` — no error path may keep a stale covariance
+  flagged usable.
 
-Full regression: ~1200 ctest tests pass (all single-antenna UL tests
-unchanged; the one failure, `network_utils_test`, is environmental — the
-container kernel lacks SCTP).
+Full regression: 1545 of 1548 ctest tests pass (all single-antenna UL tests
+unchanged; the only failures — `network_utils_test`, `s1ap_test`,
+`ngap_test` — are environmental: the container kernel lacks SCTP).
 
 ### 3.2 End-to-end over ZMQ (no hardware)
 
@@ -332,6 +337,34 @@ antennas still complete every RA they catch while one detects nothing.
    attempts (~25 s apart, T3410/T3411) then backs off 12 min (T3402); all
    hardcoded in `nas.h`. Long test campaigns must restart srsue.
 
+### Post-implementation robustness review (commit `bdc41c7`)
+
+A line-by-line review of the finished branch against its base found **no
+correctness bugs in normal operation** — the covariance conjugation and MMSE
+normalization conventions, the buffer/stride arithmetic through
+`txrx.cc`/`rf_buffer`/`radio`, and the guard-rail interaction (the 5%
+diagonal loading guarantees `det(R) ≥ 0.05·(tr/2)²`, clearing the kernel's
+`1e-4` condition gate by ~450×, so IRC engagement is deterministic, never
+flaky) were each verified. The review did surface four error/edge-path gaps,
+fixed in `bdc41c7` with no behavior change in healthy operation:
+
+1. **Stale covariance on estimation failure** — `noise_cov_valid` is now
+   invalidated as the *first* statement of
+   `srsran_chest_ul_estimate_pusch`, and `srsran_enb_ul_get_pusch` returns
+   an error instead of decoding when estimation fails. Previously a failed
+   estimate (e.g. invalid `L_prb`) could leave the previous UE's covariance
+   flagged valid and IRC-combine the next decode with it plus stale channel
+   estimates. Covered by a new negative case in `enb_ul_test` (§3.1).
+2. **Real-time allocation in the RX fast path** — `prach_worker::init()`
+   now pre-sizes the per-antenna sample buffers of the entire pool, so
+   `new_tti()` on the time-critical txrx thread never touches the allocator
+   (previously the first PRACH occasions lazily resized ~1.7 MB vectors at
+   100 PRB).
+3. **Silent config downgrade** — PRACH logs once when successive
+   cancellation restricts multi-antenna detection to a single antenna.
+4. **Cosmetic** — the IRC fallback log counter printed one higher than
+   reality (off-by-one).
+
 ---
 
 ## 5. Deploying on a B210/X310
@@ -370,6 +403,20 @@ disconnected vs both connected.
   thresholds were deliberately left untouched. A future pass could re-tune
   `threshold_*` for 2 RX to trade the gain between sensitivity and false
   alarms.
+- **Scalar-noise MRC weighting**: `srsran_predecoding_single_multi` uses one
+  noise estimate (the across-antenna mean) for all branches, so MRC is
+  slightly mis-weighted when the per-antenna noise floors genuinely differ
+  (e.g. different LNAs). IRC's covariance diagonal captures exactly this
+  case, so `equalizer_mode = irc` is the remedy where it matters.
+- **Measurement-combining edges**: an antenna whose TA could not be measured
+  contributes 0.0 µs at full RSRP weight (diluting the combined TA toward
+  zero), and a channel with literally zero estimated noise reports
+  SNR = NaN where upstream returned Inf. Both are edge-only — neither occurs
+  with real noise floors.
+- **PRACH timing from antenna 0**: detection combines the per-antenna power
+  delay profiles non-coherently, but the timing-offset estimate and the
+  frequency-domain `cross` term still come from antenna 0 alone — detection
+  gains diversity, timing estimation doesn't.
 - Kernel SCTP is required for srsepc/S1AP (full attach) — not available in
   some containers; everything up to and including Msg3 works regardless.
 

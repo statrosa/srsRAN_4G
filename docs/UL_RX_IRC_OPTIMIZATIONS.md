@@ -94,7 +94,7 @@ if (q->irc_enable && nof_rx_antennas == 2 && channel->noise_cov_valid) {
 }
 ```
 
-Three layers of "never silently fail, never regress":
+Four layers of "never silently fail, never regress":
 
 1. **Off by default** — `expert.equalizer_mode` defaults to `"mmse"` (MRC);
    IRC only engages on `"irc"`. The MRC code path is textually identical to
@@ -105,6 +105,12 @@ Three layers of "never silently fail, never regress":
 3. **In-kernel fallback** — even inside `_cov`, a covariance that fails the
    condition check falls back to MRC using `mean(diag R)`. The fallback is
    logged (rate-limited INFO), never silent.
+4. **No stale covariance** (hardened in commit `bdc41c7`) —
+   `srsran_chest_ul_estimate_pusch` invalidates `noise_cov_valid` as its
+   very first statement, and `srsran_enb_ul_get_pusch` returns an error
+   instead of decoding when the estimation fails, so combining one UE's
+   symbols with a *previous* grant's `R` (or stale channel estimates) is
+   structurally impossible.
 
 ### 2.4 Plumbing
 
@@ -130,6 +136,7 @@ to a target INR — and asserts:
 | **No regression** (no interferer, marginal SNR): IRC ≈ MRC | MRC 10/10, IRC 10/10 |
 | **Rejection** (15 dB directional interferer): IRC ≫ MRC | **MRC 0/10, IRC 10/10** |
 | **1-antenna fallback** (flag on): decodes, finite metrics | 4/4, no NaN/Inf |
+| **Stale-covariance guard**: invalid grant (`L_prb=7`) after a good IRC decode | estimate errors, `noise_cov_valid == false` |
 
 Full ctest suite passes with the flag off (the two SCTP tests and their
 kin fail only because the container kernel lacks SCTP — unrelated to this
@@ -174,6 +181,19 @@ exactly where IRC recovers it.
 - The covariance estimate is only as good as the DMRS residual: at very high
   wanted-signal SNR with no interference, `R` approaches a scaled identity and
   IRC converges to MRC (confirmed by the parity arm).
+- **Cross-term calibration is a heuristic.** The off-diagonal terms reuse the
+  smoothing-filter compensation factor that was derived for the (white-noise)
+  diagonal. That is accurate when the interference looks spectrally white-ish
+  after de-rotation by the conjugate DMRS — the common case for a
+  non-DMRS-matched interferer, and the reason the s9 nulling works — but it
+  is not derived from first principles for strongly colored interference
+  spectra.
+- **Diagonal loading caps nulling depth.** The 5% loading that guarantees
+  invertibility also bounds how deep the spatial null can get: at very high
+  INR (tens of dB) suppression saturates before the interferer is fully
+  removed. This is the standard robustness-versus-depth tradeoff; the
+  validated 15 dB INR regime sits comfortably inside it, and lowering the
+  loading factor is the knob if deeper nulls are ever needed.
 
 ## 5. Enabling it
 
