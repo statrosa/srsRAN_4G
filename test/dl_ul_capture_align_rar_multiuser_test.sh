@@ -27,9 +27,11 @@
 # Msg3 PUSCH at n+6, then dynamic DCI-0 grants - several UEs per subframe on
 # non-overlapping PRBs, their PUSCH summed into one UL subframe at n+4.
 #
-# dl_ul_capture_align is run with NO -r: it must learn every C-RNTI from the RARs,
-# decode each Msg3, and decode all the dynamic PUSCH (including several distinct
-# RNTIs sharing one UL subframe) with CRC=OK.
+# dl_ul_capture_align is run with NO -r: it must learn every C-RNTI from the RARs
+# and follow the full RRC ladder per UE - Msg3 (UL), Msg4 (DL contention
+# resolution / RRC Setup on PDSCH), Msg5 (first UL grant, RRC Setup Complete) -
+# then decode all the dynamic PUSCH (including several distinct RNTIs sharing one
+# UL subframe) with CRC=OK.
 #
 # Usage: ./dl_ul_capture_align_rar_multiuser_test.sh [build_path] [nof_prb] [nof_ue] [k_per_tti]
 
@@ -59,19 +61,21 @@ echo "== Replaying with RAR auto-learn (no -r) =="
 
 LEARNED=$(grep -c "Learned C-RNTI" "$LOG")
 MSG3_OK=$(grep "Msg3" "$LOG" | grep -c "CRC=OK")
+MSG4_OK=$(grep "Msg4" "$LOG" | grep -c "CRC=OK")
+MSG5_OK=$(grep "Msg5" "$LOG" | grep -c "CRC=OK")
 CRC_OK=$(grep -c "CRC=OK" "$LOG")
 CRC_NOK=$(grep -c "CRC=NOK" "$LOG")
 # Busiest UL subframe: how many distinct PUSCH decoded into one subframe.
 MAX_PER_SF=$(grep "CRC=OK" "$LOG" | grep -oE "UL#[0-9]+" | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')
 
 grep "Active C-RNTIs" "$LOG"
-echo "== Learned=$LEARNED/$NOF_UE, Msg3 CRC=OK=$MSG3_OK/$NOF_UE, CRC=OK=$CRC_OK, CRC=NOK=$CRC_NOK, max PUSCH/UL-sf=$MAX_PER_SF =="
+echo "== Learned=$LEARNED/$NOF_UE, ladder Msg3/Msg4/Msg5 CRC=OK=$MSG3_OK/$MSG4_OK/$MSG5_OK, CRC=OK=$CRC_OK, CRC=NOK=$CRC_NOK, max PUSCH/UL-sf=$MAX_PER_SF =="
 
-if [ "$LEARNED" -eq "$NOF_UE" ] && [ "$MSG3_OK" -eq "$NOF_UE" ] && [ "$CRC_NOK" -eq 0 ] &&
-   [ "$CRC_OK" -gt 500 ] && [ "${MAX_PER_SF:-0}" -ge 3 ]; then
-  echo "PASS: learned all $NOF_UE C-RNTIs from RAR, decoded all Msg3, and $CRC_OK PUSCH with CRC=OK"
+if [ "$LEARNED" -eq "$NOF_UE" ] && [ "$MSG3_OK" -eq "$NOF_UE" ] && [ "$MSG4_OK" -eq "$NOF_UE" ] &&
+   [ "$MSG5_OK" -eq "$NOF_UE" ] && [ "$CRC_NOK" -eq 0 ] && [ "$CRC_OK" -gt 500 ] && [ "${MAX_PER_SF:-0}" -ge 3 ]; then
+  echo "PASS: learned all $NOF_UE C-RNTIs from RAR; full Msg3/Msg4/Msg5 ladder + $CRC_OK PUSCH CRC=OK"
   echo "      (up to $MAX_PER_SF distinct PUSCH decoded in a single UL subframe)"
   exit 0
 fi
-echo "FAIL: expected $NOF_UE learned + $NOF_UE Msg3, no CRC=NOK, and >=3 PUSCH in some UL subframe"
+echo "FAIL: expected $NOF_UE learned + $NOF_UE each of Msg3/Msg4/Msg5, no CRC=NOK, and >=3 PUSCH in some UL subframe"
 exit 1

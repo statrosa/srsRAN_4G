@@ -31,12 +31,17 @@
  *                DL, the corresponding PUSCH is located in the UL capture, handed
  *                to a pool of UL decoder workers through a pull API, decoded with
  *                the eNB-side PUSCH receiver, and printed as a time-aligned
- *                DL-grant -> UL-response timeline. Two grant types are covered:
- *                  - dynamic DCI format-0 grants (PUSCH at n+4), and
- *                  - RAR-granted Msg3 (PUSCH at n+6): the RA-RNTI RAR is decoded,
- *                    each Temporary C-RNTI is learned into an active pool, and
- *                    the DCI-0 search then runs over that pool - so the tool
- *                    discovers C-RNTIs from the RACH exchange with no prior list.
+ *                DL-grant -> UL-response timeline. The full RRC connection ladder
+ *                is reconstructed from the air interface:
+ *                  - RAR: the RA-RNTI RAR is decoded, each Temporary C-RNTI is
+ *                    learned into an active pool, and the Msg3 PUSCH (n+6) decoded;
+ *                  - Msg4: the first DL grant for a learned C-RNTI is decoded on
+ *                    PDSCH (contention resolution / RRC Setup);
+ *                  - Msg5: the first UL grant for that C-RNTI (RRC Setup Complete);
+ *                  - dynamic DCI format-0 grants (PUSCH at n+4) thereafter.
+ *                The DCI-0 search runs over the active pool, so the tool discovers
+ *                C-RNTIs from the RACH exchange with no prior list. Timeline rows
+ *                are tagged Msg3 / Msg4 / Msg5 / dyn accordingly.
  *
  *                An offline file mode (--dl-file / --ul-file) drives the same
  *                pipeline from two IQ recordings for testing without hardware.
@@ -321,20 +326,39 @@ static inline uint64_t sf_mono_from_ts(const srsran_timestamp_t& ts)
 /**********************************************************************
  *  Timeline record (a decoded DL-grant -> UL-response result)
  **********************************************************************/
+// Position of a decoded transmission in the RRC connection ladder. MSG4 is a DL
+// event (contention resolution / RRC Setup on PDSCH); the rest are UL PUSCH.
+enum grant_kind_t {
+  GRANT_DYN = 0, // dynamic DCI-0 UL grant (steady state)
+  GRANT_MSG3,    // RAR-granted Msg3 (RRC Conn Request), PUSCH at n+6
+  GRANT_MSG4,    // DL contention resolution / RRC Setup (PDSCH), DL-only
+  GRANT_MSG5     // first C-RNTI UL grant after RAR (RRC Conn Setup Complete)
+};
+
+static const char* grant_kind_str(grant_kind_t k)
+{
+  switch (k) {
+    case GRANT_MSG3: return "Msg3";
+    case GRANT_MSG4: return "Msg4";
+    case GRANT_MSG5: return "Msg5";
+    default: return "dyn ";
+  }
+}
+
 struct timeline_record_t {
-  uint64_t dl_mono;
-  uint32_t dl_tti;
-  uint32_t ul_tti;
-  uint16_t rnti;
-  uint32_t mcs;
-  int      tbs;
-  uint32_t L_prb;
-  uint32_t rb_start;
-  bool     crc;
-  bool     is_msg3; // RAR-granted Msg3 (vs a dynamic DCI-0 grant)
-  float    snr_db;
-  float    ul_present; // 1 if the UL subframe was available, 0 if missed
-  double   decode_ms;
+  uint64_t     dl_mono;
+  uint32_t     dl_tti;
+  uint32_t     ul_tti;
+  uint16_t     rnti;
+  uint32_t     mcs;
+  int          tbs;
+  uint32_t     L_prb;
+  uint32_t     rb_start;
+  bool         crc;
+  grant_kind_t kind;
+  float        snr_db;
+  float        ul_present; // 1 if the UL subframe was available, 0 if missed
+  double       decode_ms;
 };
 
 /**********************************************************************
@@ -377,7 +401,7 @@ struct pending_grant_t {
   uint64_t        ul_mono;
   uint32_t        ul_tti;
   uint16_t        rnti;
-  bool            is_msg3; // RAR-granted Msg3 (n+6) vs dynamic DCI-0 grant (n+4)
+  grant_kind_t    kind;
   srsran_dci_ul_t dci;
 };
 
@@ -548,8 +572,20 @@ public:
 private:
   void print_one(const timeline_record_t& r)
   {
-    const char* kind = r.is_msg3 ? "Msg3" : "dyn ";
-    if (!r.ul_present) {
+    const char* kind = grant_kind_str(r.kind);
+    if (r.kind == GRANT_MSG4) {
+      // DL-only event: contention resolution / RRC Setup decoded on PDSCH.
+      printf("DL#%-5u %s rnti=0x%04x mcs=%2u                          (DL PDSCH)  CRC=%-3s tbs=%5db snr=%5.1fdB "
+             "(decode %.2fms)\n",
+             r.dl_tti,
+             kind,
+             r.rnti,
+             r.mcs,
+             r.crc ? "OK" : "NOK",
+             r.tbs,
+             r.snr_db,
+             r.decode_ms);
+    } else if (!r.ul_present) {
       printf("DL#%-5u %s rnti=0x%04x mcs=%2u L_prb=%2u rb_start=%2u  ->  UL#%-5u  [UL subframe missed]\n",
              r.dl_tti,
              kind,
@@ -659,7 +695,7 @@ protected:
       rec.ul_tti            = work.grant.ul_tti;
       rec.rnti              = work.grant.rnti;
       rec.mcs               = work.grant.dci.tb.mcs_idx;
-      rec.is_msg3           = work.grant.is_msg3;
+      rec.kind              = work.grant.kind;
 
       if (!work.iq_valid) {
         rec.ul_present = 0.0f;
@@ -839,12 +875,21 @@ static int      dl_file_recv_wrapper(void* h, cf_t* data[SRSRAN_MAX_PORTS], uint
 // scheduler: RAR DL tti n -> Msg3 UL tti n+6).
 #define MSG3_UL_DELAY_MS (FDD_HARQ_DELAY_DL_MS + MSG3_DELAY_MS)
 
-// Per-DL-thread RAR PDSCH decode state (single thread, no lock needed).
+// Per-DL-thread RAR PDSCH decode state (single thread, no lock needed). Reused
+// to decode the Msg4 DL PDSCH (contention resolution / RRC Setup) as well.
 struct rar_decoder_t {
   srsran_softbuffer_rx_t softbuffer = {};
   uint8_t*               data       = nullptr;
   bool                   ok         = false;
 };
+
+// Per-C-RNTI RRC ladder state, so the first DL grant after a RAR is reported as
+// Msg4 and the first UL grant as Msg5. Owned and used only by the DL thread.
+struct ue_rrc_t {
+  bool msg4_seen = false;
+  bool msg5_seen = false;
+};
+typedef std::map<uint16_t, ue_rrc_t> ue_rrc_map_t;
 
 // Parse a decoded RAR MAC PDU: learn each Temporary C-RNTI into the pool and
 // schedule the corresponding Msg3 PUSCH. The RAR PDU groups all E/T/RAPID
@@ -912,6 +957,8 @@ static void process_dl_subframe(srsran_ue_dl_t*     ue_dl,
                                 ul_capture_store*   store,
                                 crnti_pool*         pool,
                                 rar_decoder_t*      rar,
+                                ue_rrc_map_t*       rrc,
+                                timeline_printer*   printer,
                                 uint64_t*           nof_grants_seen)
 {
   srsran_dl_sf_cfg_t dl_sf = {};
@@ -922,15 +969,15 @@ static void process_dl_subframe(srsran_ue_dl_t*     ue_dl,
     return;
   }
 
-  // Enqueue a UL grant (delay = n+4 for a dynamic DCI-0, n+6 for Msg3).
-  auto push_ul = [&](uint16_t rnti, const srsran_dci_ul_t& dci, uint32_t delay, bool is_msg3) {
+  // Enqueue a UL grant (delay = n+4 for a dynamic DCI-0/Msg5, n+6 for Msg3).
+  auto push_ul = [&](uint16_t rnti, const srsran_dci_ul_t& dci, uint32_t delay, grant_kind_t kind) {
     pending_grant_t g = {};
     g.dl_mono         = dl_mono;
     g.dl_tti          = tti;
     g.ul_mono         = dl_mono + delay;
     g.ul_tti          = TTI_ADD(tti, delay);
     g.rnti            = rnti;
-    g.is_msg3         = is_msg3;
+    g.kind            = kind;
     g.dci             = dci;
     store->push_grant(g);
     (*nof_grants_seen)++;
@@ -962,22 +1009,72 @@ static void process_dl_subframe(srsran_ue_dl_t*     ue_dl,
                       cell,
                       pool,
                       [&](uint16_t crnti, const srsran_dci_ul_t& dci) {
-                        push_ul(crnti, dci, MSG3_UL_DELAY_MS, true);
+                        if (rrc != nullptr) {
+                          (void)(*rrc)[crnti]; // track this UE's ladder (Msg4/Msg5)
+                        }
+                        push_ul(crnti, dci, MSG3_UL_DELAY_MS, GRANT_MSG3);
                       });
       }
     }
   }
 
   // --- Dynamic path: search every C-RNTI currently in the active pool.
+  // For a C-RNTI that was learned from a RAR, the first DL grant is reported as
+  // Msg4 (contention resolution / RRC Setup, decoded on PDSCH) and the first UL
+  // grant as Msg5 (RRC Connection Setup Complete); the rest are steady-state.
   auto search_crnti = [&](uint16_t rnti) {
-    srsran_dci_dl_t dci_dl[SRSRAN_MAX_DCI_MSG] = {};
     // find_dl_dci runs the blind PDCCH search for this rnti and, as a side effect,
     // stashes the format-0 (UL) DCI candidates for find_ul_dci to unpack.
-    srsran_ue_dl_find_dl_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_dl);
+    srsran_dci_dl_t dci_dl[SRSRAN_MAX_DCI_MSG] = {};
+    int             nof_dl = srsran_ue_dl_find_dl_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_dl);
+
+    // Only C-RNTIs learned from a RAR carry ladder state; a CLI-seeded or
+    // blind-searched C-RNTI has no observed RACH, so its grants stay "dyn".
+    ue_rrc_t* st = nullptr;
+    if (rrc != nullptr) {
+      ue_rrc_map_t::iterator it = rrc->find(rnti);
+      if (it != rrc->end()) {
+        st = &it->second;
+      }
+    }
+
+    // First DL grant for this UE -> decode its PDSCH and report Msg4.
+    if (st != nullptr && !st->msg4_seen && nof_dl > 0 && rar->ok && printer != nullptr) {
+      srsran_pdsch_grant_t grant = {};
+      if (srsran_ue_dl_dci_to_pdsch_grant(ue_dl, &dl_sf, ue_dl_cfg, &dci_dl[0], &grant) == SRSRAN_SUCCESS) {
+        srsran_pdsch_cfg_t pcfg = {};
+        pcfg.grant              = grant;
+        pcfg.rnti               = rnti;
+        pcfg.softbuffers.rx[0]  = &rar->softbuffer;
+        srsran_softbuffer_rx_reset_tbs(&rar->softbuffer, (uint32_t)grant.tb[0].tbs);
+        srsran_pdsch_res_t res[SRSRAN_MAX_CODEWORDS] = {};
+        res[0].payload                               = rar->data;
+        int dret = srsran_ue_dl_decode_pdsch(ue_dl, &dl_sf, &pcfg, res);
+        st->msg4_seen = true;
+        timeline_record_t rec = {};
+        rec.dl_mono           = dl_mono;
+        rec.dl_tti            = tti;
+        rec.ul_tti            = tti;
+        rec.rnti              = rnti;
+        rec.mcs               = dci_dl[0].tb[0].mcs_idx;
+        rec.kind              = GRANT_MSG4;
+        rec.tbs               = grant.tb[0].tbs;
+        rec.crc               = (dret == SRSRAN_SUCCESS) && res[0].crc;
+        rec.snr_db            = ue_dl->chest_res.snr_db;
+        rec.ul_present        = 1.0f;
+        printer->submit(rec);
+      }
+    }
+
     srsran_dci_ul_t dci_ul[SRSRAN_MAX_DCI_MSG] = {};
     int             nof_ul = srsran_ue_dl_find_ul_dci(ue_dl, &dl_sf, ue_dl_cfg, rnti, dci_ul);
     for (int i = 0; i < nof_ul; i++) {
-      push_ul(rnti, dci_ul[i], FDD_HARQ_DELAY_UL_MS, false);
+      grant_kind_t kind = GRANT_DYN;
+      if (st != nullptr && !st->msg5_seen) {
+        kind          = GRANT_MSG5;
+        st->msg5_seen = true;
+      }
+      push_ul(rnti, dci_ul[i], FDD_HARQ_DELAY_UL_MS, kind);
     }
   };
 
@@ -1182,6 +1279,9 @@ int main(int argc, char** argv)
     pool.add(r);
   }
 
+  // Per-C-RNTI RRC ladder state (Msg4/Msg5 labelling), DL-thread only.
+  ue_rrc_map_t rrc_map;
+
   // RAR PDSCH decoder state (used only by the single DL thread).
   rar_decoder_t rar;
   if (args.rar_enable) {
@@ -1332,7 +1432,8 @@ int main(int argc, char** argv)
       dl_mono = sf_mono_from_ts(dl_ts);
     }
 
-    process_dl_subframe(&ue_dl, &ue_dl_cfg, &cell, args, tti, dl_mono, &store, &pool, &rar, &nof_grants_seen);
+    process_dl_subframe(
+        &ue_dl, &ue_dl_cfg, &cell, args, tti, dl_mono, &store, &pool, &rar, &rrc_map, &printer, &nof_grants_seen);
 
     if (file_mode) {
       dl_mono++;

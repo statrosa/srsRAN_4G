@@ -25,18 +25,22 @@
  *  Description:  Demanding, realistic DL+UL IQ test-vector generator for
  *                dl_ul_capture_align, using srsRAN's real PHY. Unlike
  *                gen_dl_ul_testvec (one C-RNTI, one grant per subframe), this
- *                models a multi-user cell with a RACH ramp-up:
+ *                models a multi-user cell with a RACH ramp-up and the full RRC
+ *                connection ladder per UE:
  *
- *                  - RAR phase: UEs attach over time. For each UE the generator
- *                    emits an RA-RNTI PDCCH (format 1A) + a RAR PDSCH carrying a
- *                    MAC RAR (Temporary C-RNTI + Msg3 UL grant), and the matching
- *                    Msg3 PUSCH at n+6. The tool must LEARN each C-RNTI from the
- *                    RAR (no -r needed) and decode its Msg3.
- *                  - Dynamic phase: once attached, each UE gets dynamic DCI-0
- *                    grants. Several UEs are scheduled in the SAME subframe (up to
- *                    K per TTI) on non-overlapping PDCCH CCEs and PRBs, and their
- *                    PUSCH are summed into one UL subframe at n+4 - so the tool
- *                    must decode multiple overlapping-in-time PUSCH per subframe.
+ *                  - RAR (RA-RNTI PDCCH + RAR PDSCH: Temporary C-RNTI + Msg3 grant)
+ *                  - Msg3 PUSCH at n+6 (RRC Connection Request)
+ *                  - Msg4 DL PDSCH (contention resolution / RRC Setup)
+ *                  - Msg5 = the first dynamic DCI-0 UL grant (RRC Setup Complete)
+ *                  - steady-state dynamic DCI-0 grants thereafter
+ *
+ *                UEs attach over time, so several ladders overlap. In the dynamic
+ *                phase several UEs are scheduled in the SAME subframe (up to K per
+ *                TTI) on non-overlapping PDCCH CCEs and PRBs, and their PUSCH are
+ *                summed into one UL subframe at n+4 - so the tool must decode
+ *                multiple overlapping-in-time PUSCH per subframe. The tool learns
+ *                every C-RNTI from the RARs (no -r needed) and tags the timeline
+ *                Msg3 / Msg4 / Msg5 / dyn.
  *
  *                Running dl_ul_capture_align on the result with NO -r exercises
  *                RAR auto-learn + the active C-RNTI pool + the parallel UL worker
@@ -147,6 +151,43 @@ static int place_dci_ul(srsran_enb_dl_t* enb, srsran_dci_cfg_t* cfg, srsran_dci_
   return -1;
 }
 
+static int place_locs(srsran_enb_dl_t*       enb,
+                      srsran_dci_cfg_t*      cfg,
+                      srsran_dci_dl_t*       dci,
+                      int*                   cce_used,
+                      srsran_dci_location_t* locs,
+                      uint32_t               n)
+{
+  for (uint32_t k = 0; k < n; k++) {
+    uint32_t agg = 1u << locs[k].L, c0 = locs[k].ncce;
+    int      free_slot = 1;
+    for (uint32_t c = c0; c < c0 + agg; c++) {
+      if (c >= MAX_CCE || cce_used[c]) {
+        free_slot = 0;
+        break;
+      }
+    }
+    if (free_slot) {
+      dci->location = locs[k];
+      if (srsran_enb_dl_put_pdcch_dl(enb, cfg, dci) == SRSRAN_SUCCESS) {
+        for (uint32_t c = c0; c < c0 + agg; c++) {
+          cce_used[c] = 1;
+        }
+        return 0;
+      }
+    }
+  }
+  return -1;
+}
+
+// Place a DL DCI for a C-RNTI in its UE-specific search space (used for Msg4).
+static int place_dci_dl_ue(srsran_enb_dl_t* enb, srsran_dci_cfg_t* cfg, srsran_dci_dl_t* dci, int* cce_used)
+{
+  srsran_dci_location_t locs[SRSRAN_MAX_CANDIDATES_UE];
+  uint32_t n = srsran_pdcch_ue_locations(&enb->pdcch, &enb->dl_sf, locs, SRSRAN_MAX_CANDIDATES_UE, dci->rnti);
+  return place_locs(enb, cfg, dci, cce_used, locs, n);
+}
+
 static int place_dci_dl(srsran_enb_dl_t* enb, srsran_dci_cfg_t* cfg, srsran_dci_dl_t* dci, int* cce_used)
 {
   srsran_dci_location_t locs[SRSRAN_MAX_CANDIDATES_COM];
@@ -248,13 +289,17 @@ int main(int argc, char** argv)
   // dynamic grants from its Msg3 onward. RARs start well after subframe 0 so the
   // sniffer has time to PSS/SSS-acquire and MIB-lock before the first RACH (a
   // real sniffer likewise only catches RACHes that occur after it acquires).
+  // Ladder per UE: RAR (sf r) -> Msg3 PUSCH (r+6) -> Msg4 DL PDSCH (r+8) ->
+  // first dynamic UL grant = Msg5 (from r+10). RARs are spaced so the ladders
+  // interleave (several UEs attaching/active at once).
   const uint32_t RAR_START = 40;
-  uint32_t ue_rar_sf[MAX_UE], ue_active_from[MAX_UE];
+  uint32_t ue_rar_sf[MAX_UE], ue_msg4_sf[MAX_UE], ue_active_from[MAX_UE];
   uint16_t ue_crnti[MAX_UE];
   for (uint32_t u = 0; u < nof_ue; u++) {
-    ue_rar_sf[u]      = RAR_START + 3 * u;
+    ue_rar_sf[u]      = RAR_START + 4 * u;
     ue_crnti[u]       = (uint16_t)(CRNTI_BASE + u);
-    ue_active_from[u] = ue_rar_sf[u] + MSG3_UL_DELAY + 1;
+    ue_msg4_sf[u]     = ue_rar_sf[u] + MSG3_UL_DELAY + 2; // r+8, after Msg3
+    ue_active_from[u] = ue_rar_sf[u] + MSG3_UL_DELAY + 4; // r+10, first UL = Msg5
   }
   // Msg3 uses the low PRBs; dynamic grants use PRBs above them (no overlap in a
   // shared UL subframe).
@@ -262,7 +307,7 @@ int main(int argc, char** argv)
   uint32_t dyn_rb0       = msg3_rb_start + L_rb; // first dynamic block
   uint32_t msg3_riv      = srsran_ra_type2_to_riv(L_rb, msg3_rb_start, nof_prb);
 
-  uint32_t nof_rar = 0, nof_msg3 = 0, nof_dyn = 0, nof_pusch = 0;
+  uint32_t nof_rar = 0, nof_msg3 = 0, nof_msg4 = 0, nof_dyn = 0, nof_pusch = 0;
   uint32_t rr = 0; // round-robin cursor over UEs for dynamic scheduling
 
   for (uint32_t i = 0; i < nof_subframes; i++) {
@@ -319,6 +364,41 @@ int main(int argc, char** argv)
         if (ul_sched_n[slot] < MAX_EMIT) {
           ul_sched[slot][ul_sched_n[slot]++] = (emit_t){ue_crnti[u], msg3_riv, 0, 1};
         }
+      }
+    }
+
+    // --- Msg4: DL contention resolution / RRC Setup PDSCH for a C-RNTI. ---
+    for (uint32_t u = 0; u < nof_ue; u++) {
+      if (ue_msg4_sf[u] != i) {
+        continue;
+      }
+      srsran_dci_dl_t dci_dl = {};
+      dci_dl.rnti            = ue_crnti[u];
+      dci_dl.format          = SRSRAN_DCI_FORMAT1A;
+      dci_dl.alloc_type      = SRSRAN_RA_ALLOC_TYPE2;
+      dci_dl.type2_alloc.riv = srsran_ra_type2_to_riv(4, nof_prb / 2, nof_prb);
+      dci_dl.tb[0].mcs_idx   = 4;
+      dci_dl.tb[0].rv        = 0;
+      dci_dl.tb[0].ndi       = 1;
+      dci_dl.tb[0].cw_idx    = 0;
+      SRSRAN_DCI_TB_DISABLE(dci_dl.tb[1]);
+      dci_dl.pid = 0;
+      if (place_dci_dl_ue(&enb_dl, &dci_cfg, &dci_dl, cce_used) != 0) {
+        continue;
+      }
+      srsran_pdsch_grant_t grant = {};
+      if (srsran_ra_dl_dci_to_grant(&cell, &enb_dl.dl_sf, SRSRAN_TM1, false, &dci_dl, &grant)) {
+        continue;
+      }
+      memset(data, 0x5a, (grant.tb[0].tbs / 8) + 1); // stand-in RRC Setup payload
+      srsran_pdsch_cfg_t pcfg = {};
+      pcfg.grant              = grant;
+      pcfg.rnti               = ue_crnti[u];
+      srsran_softbuffer_tx_reset(&dl_sb);
+      pcfg.softbuffers.tx[0]               = &dl_sb;
+      uint8_t* pdata[SRSRAN_MAX_CODEWORDS] = {data};
+      if (srsran_enb_dl_put_pdsch(&enb_dl, &pcfg, pdata) == SRSRAN_SUCCESS) {
+        nof_msg4++;
       }
     }
 
@@ -397,11 +477,12 @@ int main(int argc, char** argv)
     srsran_filesink_write(&ul_sink, ul_acc, sf_len);
   }
 
-  printf("Generated %u sf, %u UEs: %u RARs, %u Msg3, %u dynamic grants, %u PUSCH emitted\n",
+  printf("Generated %u sf, %u UEs: %u RARs, %u Msg3, %u Msg4, %u dynamic grants, %u PUSCH emitted\n",
          nof_subframes,
          nof_ue,
          nof_rar,
          nof_msg3,
+         nof_msg4,
          nof_dyn,
          nof_pusch);
   printf("  DL: %s\n  UL: %s\n", dl_file, ul_file);
