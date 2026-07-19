@@ -96,6 +96,9 @@ if(RF_FOUND)
   add_executable(gen_dl_ul_testvec gen_dl_ul_testvec.c)
   target_link_libraries(gen_dl_ul_testvec srsran_phy srsran_common pthread)
 
+  add_executable(gen_dl_ul_multiuser gen_dl_ul_multiuser.c)
+  target_link_libraries(gen_dl_ul_multiuser srsran_phy srsran_common pthread)
+
   add_executable(usrp_capture_sync_nbiot usrp_capture_sync_nbiot.c)
   target_link_libraries(usrp_capture_sync_nbiot srsran_rf srsran_phy)
 
